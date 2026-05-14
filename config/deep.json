@@ -1,0 +1,861 @@
+{
+  "config_version": 0.2,
+  "description": "speakeasy-extensions deep Speakeasy profile: Windows 11-like userland with memory tracing and retained freed memory",
+  "emu_engine": "unicorn",
+  "timeout": 300,
+  "max_api_count": 30000,
+  "system": "windows",
+  "analysis": {
+    "memory_tracing": true,
+    "strings": true
+  },
+  "keep_memory_on_free": true,
+  "exceptions": {
+    "dispatch_handlers": true
+  },
+  "os_ver": {
+    "name": "windows",
+    "major": 10,
+    "minor": 0,
+    "release": 23,
+    "build": 22631
+  },
+  "current_dir": "C:\\Users\\analyst\\Downloads",
+  "command_line": "sample.exe",
+  "env": {
+    "comspec": "C:\\Windows\\System32\\cmd.exe",
+    "systemroot": "C:\\Windows",
+    "windir": "C:\\Windows",
+    "temp": "C:\\Users\\analyst\\AppData\\Local\\Temp\\",
+    "tmp": "C:\\Users\\analyst\\AppData\\Local\\Temp\\",
+    "userprofile": "C:\\Users\\analyst",
+    "systemdrive": "C:",
+    "allusersprofile": "C:\\ProgramData",
+    "programdata": "C:\\ProgramData",
+    "programfiles": "C:\\Program Files",
+    "programfiles(x86)": "C:\\Program Files (x86)",
+    "appdata": "C:\\Users\\analyst\\AppData\\Roaming",
+    "localappdata": "C:\\Users\\analyst\\AppData\\Local",
+    "username": "analyst",
+    "computername": "WORKSTATION-01",
+    "processor_architecture": "AMD64",
+    "processor_identifier": "Intel64 Family 6 Model 167 Stepping 1, GenuineIntel",
+    "number_of_processors": "8"
+  },
+  "domain": "WORKGROUP",
+  "hostname": "WORKSTATION-01",
+  "user": {
+    "name": "analyst",
+    "is_admin": true,
+    "sid": "S-1-5-21-2873919842-1457385526-4081937108-1001"
+  },
+  "api_hammering": {
+    "enabled": false,
+    "threshold": 2000,
+    "allow_list": [
+      "kernel32.WriteFile",
+      "kernel32.ReadFile"
+    ]
+  },
+  "symlinks": [
+    {
+      "name": "\\??\\C:",
+      "target": "\\Device\\HarddiskVolume1"
+    },
+    {
+      "name": "\\??\\PhysicalDrive0",
+      "target": "\\Device\\Harddisk0\\DR0"
+    }
+  ],
+  "drives": [
+    {
+      "root_path": "C:\\",
+      "drive_type": "DRIVE_FIXED",
+      "volume_guid_path": "\\\\?\\Volume{bb1d6623-5e53-11ea-a949-100000000001}\\"
+    },
+    {
+      "root_path": "D:\\",
+      "drive_type": "DRIVE_CDROM",
+      "volume_guid_path": "\\\\?\\Volume{bb1d6623-5e53-11ea-a949-100000000002}\\"
+    }
+  ],
+  "filesystem": {
+    "files": [
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\AppData\\Local\\Temp\\*",
+        "byte_fill": {
+          "byte": "0x00",
+          "size": 0
+        }
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Program Files (x86)\\Internet Explorer\\iexplore.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Program Files\\Internet Explorer\\iexplore.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\certutil.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\cscript.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\wscript.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\mshta.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\regsvr32.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\rundll32.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\programdata\\mydir\\myfile.bin",
+        "byte_fill": {
+          "byte": "0x41",
+          "size": 512
+        }
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\system32\\cmd.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\system32\\svchost.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "by_ext",
+        "ext": "exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "by_ext",
+        "ext": "txt",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "\\\\.\\pipe*",
+        "path": "$ROOT$/resources/web/stager.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\Downloads\\*",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\Desktop\\*",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\Documents\\*",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\*",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\AppData\\Local\\Microsoft\\Windows\\UsrClass.dat",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Users\\analyst\\NTUSER.DAT",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\desktop.ini",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\Prefetch\\EXPLORER.EXE-*.pf",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\Prefetch\\MSEDGE.EXE-*.pf",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\SysWOW64\\cmd.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\SysWOW64\\rundll32.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      },
+      {
+        "mode": "full_path",
+        "emu_path": "c:\\Windows\\SysWOW64\\regsvr32.exe",
+        "path": "$ROOT$/resources/files/default.bin"
+      }
+    ]
+  },
+  "registry": {
+    "keys": [
+      {
+        "path": "HKEY_LOCAL_MACHINE\\System\\CurrentControlSet\\Services\\usbsamp",
+        "values": [
+          {
+            "name": "DisplayName",
+            "type": "REG_SZ",
+            "data": "An example service"
+          },
+          {
+            "name": "Start",
+            "type": "REG_DWORD",
+            "data": "0x00000003"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_CLASSES_ROOT\\Interface\\{b196b287-bab4-101a-b69c-00aa00341d07}",
+        "values": [
+          {
+            "name": "default",
+            "type": "REG_SZ",
+            "data": "IEnumConnections"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
+        "values": [
+          {
+            "name": "default",
+            "type": "REG_SZ",
+            "data": "IEnumConnections"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows NT\\CurrentVersion",
+        "values": [
+          {
+            "name": "ProductName",
+            "type": "REG_SZ",
+            "data": "Windows 11 Pro"
+          },
+          {
+            "name": "DisplayVersion",
+            "type": "REG_SZ",
+            "data": "23H2"
+          },
+          {
+            "name": "CurrentBuild",
+            "type": "REG_SZ",
+            "data": "22631"
+          },
+          {
+            "name": "UBR",
+            "type": "REG_DWORD",
+            "data": "0x00000D90"
+          },
+          {
+            "name": "RegisteredOwner",
+            "type": "REG_SZ",
+            "data": "analyst"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\BIOS",
+        "values": [
+          {
+            "name": "SystemManufacturer",
+            "type": "REG_SZ",
+            "data": "Dell Inc."
+          },
+          {
+            "name": "SystemProductName",
+            "type": "REG_SZ",
+            "data": "XPS 8940"
+          },
+          {
+            "name": "BIOSVendor",
+            "type": "REG_SZ",
+            "data": "Dell Inc."
+          },
+          {
+            "name": "BIOSVersion",
+            "type": "REG_SZ",
+            "data": "2.15.0"
+          },
+          {
+            "name": "BaseBoardManufacturer",
+            "type": "REG_SZ",
+            "data": "Dell Inc."
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+        "values": [
+          {
+            "name": "ProgramFilesDir",
+            "type": "REG_SZ",
+            "data": "C:\\Program Files"
+          },
+          {
+            "name": "ProgramFilesDir (x86)",
+            "type": "REG_SZ",
+            "data": "C:\\Program Files (x86)"
+          },
+          {
+            "name": "CommonFilesDir",
+            "type": "REG_SZ",
+            "data": "C:\\Program Files\\Common Files"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
+        "values": [
+          {
+            "name": "Desktop",
+            "type": "REG_EXPAND_SZ",
+            "data": "%USERPROFILE%\\Desktop"
+          },
+          {
+            "name": "Personal",
+            "type": "REG_EXPAND_SZ",
+            "data": "%USERPROFILE%\\Documents"
+          },
+          {
+            "name": "Downloads",
+            "type": "REG_EXPAND_SZ",
+            "data": "%USERPROFILE%\\Downloads"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
+        "values": [
+          {
+            "name": "Hidden",
+            "type": "REG_DWORD",
+            "data": "0x00000002"
+          },
+          {
+            "name": "ShowSuperHidden",
+            "type": "REG_DWORD",
+            "data": "0x00000000"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Control\\ComputerName\\ComputerName",
+        "values": [
+          {
+            "name": "ComputerName",
+            "type": "REG_SZ",
+            "data": "WORKSTATION-01"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+        "values": [
+          {
+            "name": "Hostname",
+            "type": "REG_SZ",
+            "data": "WORKSTATION-01"
+          },
+          {
+            "name": "NV Hostname",
+            "type": "REG_SZ",
+            "data": "WORKSTATION-01"
+          },
+          {
+            "name": "Domain",
+            "type": "REG_SZ",
+            "data": ""
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows Defender",
+        "values": [
+          {
+            "name": "DisableAntiSpyware",
+            "type": "REG_DWORD",
+            "data": "0x00000000"
+          }
+        ]
+      },
+      {
+        "path": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Google Chrome",
+        "values": [
+          {
+            "name": "DisplayName",
+            "type": "REG_SZ",
+            "data": "Google Chrome"
+          },
+          {
+            "name": "DisplayVersion",
+            "type": "REG_SZ",
+            "data": "124.0.6367.119"
+          }
+        ]
+      }
+    ]
+  },
+  "network": {
+    "dns": {
+      "names": {
+        "default": "198.51.100.10",
+        "localhost": "127.0.0.1",
+        "wpad": "198.51.100.10",
+        "WORKSTATION-01": "127.0.0.1"
+      },
+      "txt": [
+        {
+          "name": "default",
+          "path": "$ROOT$/resources/web/default.bin"
+        }
+      ]
+    },
+    "http": {
+      "responses": [
+        {
+          "verb": "GET",
+          "files": [
+            {
+              "mode": "by_ext",
+              "ext": "gif",
+              "path": "$ROOT$/resources/web/decoy.gif"
+            },
+            {
+              "mode": "by_ext",
+              "ext": "jpg",
+              "path": "$ROOT$/resources/web/decoy.jpg"
+            },
+            {
+              "mode": "default",
+              "path": "$ROOT$/resources/web/default.bin"
+            }
+          ]
+        },
+        {
+          "verb": "POST",
+          "files": [
+            {
+              "mode": "default",
+              "path": "$ROOT$/resources/web/default.bin"
+            }
+          ]
+        }
+      ]
+    },
+    "winsock": {
+      "responses": [
+        {
+          "mode": "default",
+          "path": "$ROOT$/resources/web/stager.bin"
+        }
+      ]
+    },
+    "adapters": [
+      {
+        "name": "{6F9619FF-8B86-D011-B42D-00C04FC964FF}",
+        "description": "Intel(R) Wi-Fi 6 AX201 160MHz",
+        "mac_address": "D8-BB-C1-4A-2F-91",
+        "type": "ethernet",
+        "ip_address": "192.168.1.42",
+        "subnet_mask": "255.255.255.0",
+        "dhcp_enabled": true
+      }
+    ]
+  },
+  "processes": [
+    {
+      "name": "System",
+      "base_addr": "0x80000000",
+      "pid": 4,
+      "path": "[System Process]"
+    },
+    {
+      "name": "smss",
+      "base_addr": "0x05000000",
+      "path": "C:\\Windows\\system32\\smss.exe"
+    },
+    {
+      "name": "csrss",
+      "base_addr": "0x05510000",
+      "path": "C:\\Windows\\system32\\csrss.exe"
+    },
+    {
+      "name": "wininit",
+      "base_addr": "0x05520000",
+      "path": "C:\\Windows\\system32\\wininit.exe"
+    },
+    {
+      "name": "services",
+      "base_addr": "0x05530000",
+      "path": "C:\\Windows\\system32\\services.exe"
+    },
+    {
+      "name": "lsass",
+      "base_addr": "0x05540000",
+      "path": "C:\\Windows\\system32\\lsass.exe"
+    },
+    {
+      "name": "winlogon",
+      "base_addr": "0x05550000",
+      "path": "C:\\Windows\\system32\\winlogon.exe"
+    },
+    {
+      "name": "svchost",
+      "base_addr": "0x05560000",
+      "path": "C:\\Windows\\system32\\svchost.exe"
+    },
+    {
+      "name": "outlook",
+      "base_addr": "0x05590000",
+      "path": "C:\\Windows\\system32\\outlook.exe"
+    },
+    {
+      "name": "explorer",
+      "base_addr": "0x05570000",
+      "path": "C:\\Windows\\explorer.exe"
+    },
+    {
+      "name": "sample",
+      "base_addr": "0x00400000",
+      "path": "C:\\Users\\analyst\\Downloads\\sample.exe",
+      "command_line": "sample.exe",
+      "is_main_exe": true,
+      "session": 1
+    },
+    {
+      "name": "powershell",
+      "base_addr": "0x055A0000",
+      "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+    },
+    {
+      "name": "cmd",
+      "base_addr": "0x055B0000",
+      "path": "C:\\Windows\\System32\\cmd.exe"
+    },
+    {
+      "name": "msedge",
+      "base_addr": "0x055C0000",
+      "path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+    }
+  ],
+  "modules": {
+    "modules_always_exist": false,
+    "functions_always_exist": false,
+    "module_directory_x86": "$ROOT$/winenv/decoys/x86",
+    "module_directory_x64": "$ROOT$/winenv/decoys/amd64",
+    "system_modules": [
+      {
+        "name": "ntoskrnl",
+        "base_addr": "0x803d0000",
+        "path": "C:\\Windows\\system32\\ntoskrnl.exe"
+      },
+      {
+        "name": "hal",
+        "base_addr": "0xC1000000",
+        "path": "C:\\Windows\\system32\\hal.dll"
+      },
+      {
+        "name": "ntfs",
+        "base_addr": "0xC2000000",
+        "path": "C:\\Windows\\system32\\drivers\\ntfs.sys"
+      },
+      {
+        "name": "netio",
+        "base_addr": "0xD4000000",
+        "path": "C:\\Windows\\system32\\drivers\\netio.sys"
+      },
+      {
+        "name": "volmgr",
+        "base_addr": "0xC6000000",
+        "path": "C:\\Windows\\system32\\drivers\\volmgr.sys",
+        "driver": {
+          "name": "\\Driver\\volmgr",
+          "devices": [
+            {
+              "name": "\\Device\\HarddiskVolume1"
+            }
+          ]
+        }
+      },
+      {
+        "name": "disk",
+        "base_addr": "0xC3000000",
+        "path": "C:\\Windows\\system32\\drivers\\disk.sys",
+        "driver": {
+          "name": "\\Driver\\Disk",
+          "devices": [
+            {
+              "name": "\\Device\\Harddisk0\\DR0"
+            }
+          ]
+        }
+      },
+      {
+        "name": "tcpip",
+        "base_addr": "0xC4000000",
+        "path": "C:\\Windows\\system32\\drivers\\tcpip.sys",
+        "driver": {
+          "name": "\\Driver\\Tcpip",
+          "devices": [
+            {
+              "name": "\\Device\\Tcp"
+            }
+          ]
+        }
+      },
+      {
+        "name": "ndis",
+        "base_addr": "0xC7000000",
+        "path": "C:\\Windows\\system32\\drivers\\ndis.sys",
+        "driver": {
+          "name": "\\Driver\\Ndis",
+          "devices": [
+            {
+              "name": "\\Device\\Ndis"
+            }
+          ]
+        }
+      }
+    ],
+    "user_modules": [
+      {
+        "name": "ntdll",
+        "base_addr": "0x7C000000",
+        "path": "C:\\Windows\\system32\\ntdll.dll"
+      },
+      {
+        "name": "kernel32",
+        "base_addr": "0x77000000",
+        "path": "C:\\Windows\\system32\\kernel32.dll"
+      },
+      {
+        "name": "ws2_32",
+        "base_addr": "0x78C00000",
+        "path": "C:\\Windows\\system32\\ws2_32.dll"
+      },
+      {
+        "name": "wininet",
+        "base_addr": "0x7BC00000",
+        "path": "C:\\Windows\\system32\\wininet.dll"
+      },
+      {
+        "name": "winhttp",
+        "base_addr": "0x7BA00000",
+        "path": "C:\\Windows\\system32\\winhttp.dll"
+      },
+      {
+        "name": "advapi32",
+        "base_addr": "0x78000000",
+        "path": "C:\\Windows\\system32\\advapi32.dll"
+      },
+      {
+        "name": "psapi",
+        "base_addr": "0x71000000",
+        "path": "C:\\Windows\\system32\\psapi.dll"
+      },
+      {
+        "name": "user32",
+        "base_addr": "0x77D10000",
+        "path": "C:\\Windows\\system32\\user32.dll"
+      },
+      {
+        "name": "gdi32",
+        "base_addr": "0x77E10000",
+        "path": "C:\\Windows\\system32\\gdi32.dll"
+      },
+      {
+        "name": "msvcrt",
+        "base_addr": "0x77F10000",
+        "path": "C:\\Windows\\system32\\msvcrt.dll"
+      },
+      {
+        "name": "dnsapi",
+        "base_addr": "0x78F10000",
+        "path": "C:\\Windows\\system32\\dnsapi.dll"
+      },
+      {
+        "name": "shlwapi",
+        "base_addr": "0x67000000",
+        "path": "C:\\Windows\\system32\\shlwapi.dll"
+      },
+      {
+        "name": "advpack",
+        "base_addr": "0x68F00000",
+        "path": "C:\\Windows\\system32\\advpack.dll"
+      },
+      {
+        "name": "dbghelp",
+        "base_addr": "0x62000000",
+        "path": "C:\\Windows\\system32\\dbghelp.dll"
+      },
+      {
+        "name": "shell32",
+        "base_addr": "0x69000000",
+        "path": "C:\\Windows\\system32\\shell32.dll"
+      },
+      {
+        "name": "WTSAPI32",
+        "base_addr": "0x63000000",
+        "path": "C:\\Windows\\system32\\WTSAPI32.dll"
+      },
+      {
+        "name": "CRYPT32",
+        "base_addr": "0x58000000",
+        "path": "C:\\Windows\\system32\\CRYPT32.dll"
+      },
+      {
+        "name": "mscoree",
+        "base_addr": "0x53000000",
+        "path": "C:\\Windows\\system32\\mscoree.dll"
+      },
+      {
+        "name": "urlmon",
+        "base_addr": "0x54500000",
+        "path": "C:\\Windows\\system32\\urlmon.dll"
+      },
+      {
+        "name": "riched32",
+        "base_addr": "0x56500000",
+        "path": "C:\\Windows\\system32\\riched32.dll"
+      },
+      {
+        "name": "userenv",
+        "base_addr": "0x76500000",
+        "path": "C:\\Windows\\system32\\userenv.dll"
+      },
+      {
+        "name": "ole32",
+        "base_addr": "0x65500000",
+        "path": "C:\\Windows\\system32\\ole32.dll"
+      },
+      {
+        "name": "gdiplus",
+        "base_addr": "0x75500000",
+        "path": "C:\\Windows\\system32\\gdiplus.dll"
+      },
+      {
+        "name": "setupapi",
+        "base_addr": "0x55500000",
+        "path": "C:\\Windows\\system32\\setupapi.dll"
+      },
+      {
+        "name": "NETAPI32",
+        "base_addr": "0x54400000",
+        "path": "C:\\Windows\\system32\\NETAPI32.dll"
+      },
+      {
+        "name": "rpcrt4",
+        "base_addr": "0x53300000",
+        "path": "C:\\Windows\\system32\\Rpcrt4.dll"
+      },
+      {
+        "name": "linkinfo",
+        "base_addr": "0x63300000",
+        "path": "C:\\Windows\\system32\\linkinfo.dll"
+      },
+      {
+        "name": "EhStorShell",
+        "base_addr": "0x73300000",
+        "path": "C:\\Windows\\system32\\EhStorShell.dll"
+      },
+      {
+        "name": "comctl32",
+        "base_addr": "0x5f500000",
+        "path": "C:\\Windows\\system32\\comctl32.dll"
+      },
+      {
+        "name": "secur32",
+        "base_addr": "0x5f600000",
+        "path": "C:\\Windows\\system32\\secur32.dll"
+      },
+      {
+        "name": "KtmW32",
+        "base_addr": "0x5f700000",
+        "path": "C:\\Windows\\system32\\KtmW32.dll"
+      },
+      {
+        "name": "oleaut32",
+        "base_addr": "0x5f800000",
+        "path": "C:\\Windows\\system32\\oleaut32.dll"
+      },
+      {
+        "name": "bcrypt",
+        "base_addr": "0x5f900000",
+        "path": "C:\\Windows\\system32\\bcrypt.dll"
+      },
+      {
+        "name": "ncrypt",
+        "base_addr": "0x5fa00000",
+        "path": "C:\\Windows\\system32\\ncrypt.dll"
+      },
+      {
+        "name": "netutils",
+        "base_addr": "0x5fb00000",
+        "path": "C:\\Windows\\system32\\netutils.dll"
+      },
+      {
+        "name": "wkscli",
+        "base_addr": "0x5fc00000",
+        "path": "C:\\Windows\\system32\\wkscli.dll"
+      },
+      {
+        "name": "iphlpapi",
+        "base_addr": "0x5fd00000",
+        "path": "C:\\Windows\\system32\\iphlpapi.dll"
+      }
+    ]
+  }
+}
