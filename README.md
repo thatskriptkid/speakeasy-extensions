@@ -3,9 +3,7 @@
 Additional API hooks, Docker packaging, behavior extraction, and corpus-hardening
 tools for [Mandiant Speakeasy](https://github.com/mandiant/speakeasy).
 
-This repo is designed to be applied on top of a normal Speakeasy install. It
-does not contain malware samples, private corpus data, Windows DLLs, API keys,
-or lab-specific configuration.
+This repo is designed to be applied on top of a normal Speakeasy install.
 
 ## What is included
 
@@ -62,8 +60,7 @@ controlled fake successes so you can observe intent without contacting live C2.
 
 ## Optional Windows module directories
 
-Speakeasy can behave better when it sees real Windows PE modules. Do not commit
-those DLLs to this repository. Mount your own module directories at runtime:
+Speakeasy can behave better when it sees real Windows PE modules. 
 
 ```bash
 export SPEAKEASY_MODULE_DIR_X64=/path/to/windows/x64/modules
