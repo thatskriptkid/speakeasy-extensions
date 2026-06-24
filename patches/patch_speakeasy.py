@@ -21,6 +21,86 @@ def _insert_once(text: str, needle: str, marker: str, block: str, path: Path) ->
     return text.replace(marker, block + marker, 1)
 
 
+def patch_winemu_api_return_guard() -> None:
+    winemu = _speakeasy_root() / "windows" / "winemu.py"
+    text = winemu.read_text(encoding="utf-8")
+    if "Speakeasy overlay: coerce non-integer API return values" in text:
+        return
+
+    old = """            # Log the API args and return value
+            self.log_api(oret, imp_api, rv, argv)
+"""
+    new = """            # Speakeasy overlay: coerce non-integer API return values.
+            if rv is not None and not isinstance(rv, int):
+                try:
+                    rv = int(rv)
+                except Exception:
+                    try:
+                        self.log_info('API handler %s returned non-integer %r; coercing to 0' % (imp_api, rv))
+                    except Exception:
+                        pass
+                    rv = 0
+
+            # Log the API args and return value
+            self.log_api(oret, imp_api, rv, argv)
+"""
+    if old not in text:
+        raise RuntimeError(f"winemu API return guard anchor not found in {winemu}")
+    winemu.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def patch_speakeasy_file_archive_empty_name_guard() -> None:
+    speakeasy_py = _speakeasy_root() / "speakeasy.py"
+    text = speakeasy_py.read_text(encoding="utf-8")
+    if "Speakeasy overlay: dropped files with empty archive names" in text:
+        return
+
+    old = """                path = f.get_path()
+                file_name = ntpath.basename(path)
+                manifest.append({'path': path,
+                                 'file_name': file_name,
+                                 'size': f.get_size(),
+                                 'sha256': f.get_hash()})
+                zf.writestr(file_name, f.get_data())
+"""
+    new = """                path = f.get_path()
+                file_name = ntpath.basename(path)
+                if not file_name:
+                    # Speakeasy overlay: dropped files with empty archive names
+                    # make zipfile.writestr raise IndexError.
+                    file_name = 'dropped_%04d.bin' % len(manifest)
+                manifest.append({'path': path,
+                                 'file_name': file_name,
+                                 'size': f.get_size(),
+                                 'sha256': f.get_hash()})
+                zf.writestr(file_name, f.get_data())
+"""
+    if old not in text:
+        raise RuntimeError(f"create_file_archive patch anchor not found in {speakeasy_py}")
+    speakeasy_py.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def patch_cli_all_entrypoints_env() -> None:
+    cli = _speakeasy_root() / "cli.py"
+    text = cli.read_text(encoding="utf-8")
+    if "Speakeasy overlay: allow batch runners to skip export entrypoints" in text:
+        return
+
+    old = """            module = se.load_module(fpath)
+            se.run_module(module, all_entrypoints=True,
+                    emulate_children=emulate_children)
+"""
+    new = """            module = se.load_module(fpath)
+            # Speakeasy overlay: allow batch runners to skip export entrypoints.
+            all_entrypoints = os.environ.get('SPEAKEASY_ALL_ENTRYPOINTS', '1').lower() not in ('0', 'false', 'no')
+            se.run_module(module, all_entrypoints=all_entrypoints,
+                    emulate_children=emulate_children)
+"""
+    if old not in text:
+        raise RuntimeError(f"Speakeasy CLI all_entrypoints anchor not found in {cli}")
+    cli.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
 def patch_fls_get_value2() -> None:
     kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
     text = kernel32.read_text(encoding="utf-8")
@@ -310,6 +390,14 @@ def patch_ole32_stream_helpers() -> None:
     def OleUninitialize(self, emu, argv, ctx={}):
         return None
 
+    @apihook('OleRun', argc=1)
+    def OleRun(self, emu, argv, ctx={}):
+        return windefs.S_OK
+
+    @apihook('OleLockRunning', argc=3)
+    def OleLockRunning(self, emu, argv, ctx={}):
+        return windefs.S_OK
+
     @apihook('CreateStreamOnHGlobal', argc=3)
     def CreateStreamOnHGlobal(self, emu, argv, ctx={}):
         '''
@@ -418,6 +506,18 @@ def patch_ole32_stream_helpers() -> None:
             self.mem_write(lpdwRegister, (1).to_bytes(4, 'little'))
         return windefs.S_OK
 
+    @apihook('CoGetClassObject', argc=5)
+    def CoGetClassObject(self, emu, argv, ctx={}):
+        rclsid, dwClsContext, pServerInfo, riid, ppv = argv
+        if ppv:
+            try:
+                factory = self.mem_alloc(0x100, tag='api.ole32.IClassFactory')
+                self.mem_write(factory, b'\\x00' * 0x100)
+                self.mem_write(ppv, factory.to_bytes(emu.get_ptr_size(), 'little'))
+            except Exception:
+                pass
+        return windefs.S_OK
+
     @apihook('CoRegisterMessageFilter', argc=2)
     def CoRegisterMessageFilter(self, emu, argv, ctx={}):
         lpMessageFilter, lplpMessageFilter = argv
@@ -486,6 +586,11 @@ def patch_ole32_dragdrop_helpers() -> None:
     @apihook('CoLockObjectExternal', argc=3)
     def CoLockObjectExternal(self, emu, argv, ctx={}):
         pUnk, fLock, fLastUnlockReleases = argv
+        return windefs.S_OK
+
+    @apihook('CoAllowSetForegroundWindow', argc=2)
+    def CoAllowSetForegroundWindow(self, emu, argv, ctx={}):
+        pUnk, lpvReserved = argv
         return windefs.S_OK
 
 """
@@ -665,6 +770,10 @@ def patch_oleaut32_variant_ordinals() -> None:
     @apihook('ordinal_153', argc=2, ordinal=153)
     def ordinal_153(self, emu, argv, ctx={}):
         return self.ordinal_149(emu, argv, ctx)
+
+    @apihook('ordinal_161', argc=e_arch.VAR_ARGS, ordinal=161)
+    def ordinal_161(self, emu, argv, ctx={}):
+        return 0
 
     @apihook('ordinal_200', argc=4, ordinal=200)
     def ordinal_200(self, emu, argv, ctx={}):
@@ -2054,6 +2163,16 @@ def patch_kernel32_wait_for_multiple_objects_ex() -> None:
             return windefs.WAIT_OBJECT_0
         return windefs.WAIT_TIMEOUT
 
+    @apihook('MsgWaitForMultipleObjectsEx', argc=5)
+    def MsgWaitForMultipleObjectsEx(self, emu, argv, ctx={}):
+        nCount, pHandles, dwMilliseconds, dwWakeMask, dwFlags = argv
+        return windefs.WAIT_TIMEOUT
+
+    @apihook('MsgWaitForMultipleObjects', argc=5)
+    def MsgWaitForMultipleObjects(self, emu, argv, ctx={}):
+        nCount, pHandles, fWaitAll, dwMilliseconds, dwWakeMask = argv
+        return windefs.WAIT_TIMEOUT
+
 """
     text = _insert_once(text, "def WaitForMultipleObjectsEx(", marker, handler, kernel32)
     kernel32.write_text(text, encoding="utf-8")
@@ -2513,6 +2632,146 @@ def patch_advapi_service_ctrl_handler_ex() -> None:
     advapi32.write_text(text, encoding="utf-8")
 
 
+def patch_advapi_token_information_realism() -> None:
+    advapi32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "advapi32.py"
+    text = advapi32.read_text(encoding="utf-8")
+    if "Speakeasy overlay: realistic token information classes" in text:
+        return
+
+    old = """    @apihook('GetTokenInformation', argc=5)
+    def GetTokenInformation(self, emu, argv, ctx={}):
+        '''
+        BOOL GetTokenInformation(
+            HANDLE                  TokenHandle,
+            TOKEN_INFORMATION_CLASS TokenInformationClass,
+            LPVOID                  TokenInformation,
+            DWORD                   TokenInformationLength,
+            PDWORD                  ReturnLength
+        );
+        '''
+        hnd, info_class, info, info_len, ret_len = argv
+        rv = True
+
+        if not info_len:
+            rv = False
+            emu.set_last_error(windefs.ERROR_INSUFFICIENT_BUFFER)
+
+        if info_class == 20 and info and emu.get_user().get('is_admin', True):
+            self.mem_write(info, (1).to_bytes(4, 'little'))
+
+        if ret_len:
+            self.mem_write(ret_len, (4).to_bytes(4, 'little'))
+
+        return rv
+
+"""
+    new = """    def _vibe_token_sid(self, emu, integrity=False):
+        if integrity:
+            attr = '_vibe_integrity_sid_ptr'
+            raw = b'\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x10\\x00\\x20\\x00\\x00'  # S-1-16-8192
+            tag = 'api.advapi32.sid.integrity'
+        else:
+            attr = '_vibe_system_sid_ptr'
+            raw = b'\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x05\\x12\\x00\\x00\\x00'  # S-1-5-18
+            tag = 'api.advapi32.sid.system'
+        sid = getattr(self, attr, 0)
+        if not sid:
+            sid = self.mem_alloc(len(raw), tag=tag)
+            self.mem_write(sid, raw)
+            setattr(self, attr, sid)
+        return sid
+
+    def _vibe_sid_and_attributes(self, emu, sid, attrs=0):
+        ptr_size = emu.get_ptr_size()
+        data = bytearray(ptr_size + 8)
+        data[0:ptr_size] = int(sid or 0).to_bytes(ptr_size, 'little')
+        data[ptr_size:ptr_size + 4] = (attrs & 0xFFFFFFFF).to_bytes(4, 'little')
+        return bytes(data)
+
+    @apihook('GetTokenInformation', argc=5)
+    def GetTokenInformation(self, emu, argv, ctx={}):
+        '''
+        BOOL GetTokenInformation(
+            HANDLE                  TokenHandle,
+            TOKEN_INFORMATION_CLASS TokenInformationClass,
+            LPVOID                  TokenInformation,
+            DWORD                   TokenInformationLength,
+            PDWORD                  ReturnLength
+        );
+        '''
+        hnd, info_class, info, info_len, ret_len = argv
+        info_class &= 0xFFFFFFFF
+        info_len &= 0xFFFFFFFF
+        ptr_size = emu.get_ptr_size()
+
+        # Speakeasy overlay: realistic token information classes.
+        if info_class == 1:  # TokenUser
+            data = self._vibe_sid_and_attributes(emu, self._vibe_token_sid(emu), 0)
+        elif info_class == 18:  # TokenElevationTypeDefault
+            data = (1).to_bytes(4, 'little')
+        elif info_class == 20:  # TokenElevation
+            data = (1 if emu.get_user().get('is_admin', True) else 0).to_bytes(4, 'little')
+        elif info_class == 25:  # TokenIntegrityLevel / TOKEN_MANDATORY_LABEL
+            data = self._vibe_sid_and_attributes(emu, self._vibe_token_sid(emu, integrity=True), 0x20)
+        else:
+            data = b'\\x00' * 4
+
+        required = len(data)
+        if ret_len:
+            try:
+                self.mem_write(ret_len, required.to_bytes(4, 'little'))
+            except Exception:
+                pass
+        if not info or info_len < required:
+            emu.set_last_error(windefs.ERROR_INSUFFICIENT_BUFFER)
+            return False
+        try:
+            self.mem_write(info, data)
+        except Exception:
+            emu.set_last_error(windefs.ERROR_INVALID_PARAMETER)
+            return False
+        emu.set_last_error(windefs.ERROR_SUCCESS)
+        return True
+
+"""
+    if old not in text:
+        raise RuntimeError(f"GetTokenInformation patch anchor not found in {advapi32}")
+    text = text.replace(old, new, 1)
+
+    old_sid = """    @apihook('GetSidSubAuthority', argc=2)
+    def GetSidSubAuthority(self, emu, argv, ctx={}):
+        '''
+        PDWORD GetSidSubAuthority(
+          [in] PSID  pSid,
+          [in] DWORD nSubAuthority
+        );
+        '''
+        sid, nsub = argv
+
+        # SubAuthorities begin at offset 0x8
+        return sid + 8 + (nsub * 4)
+
+"""
+    new_sid = """    @apihook('GetSidSubAuthority', argc=2)
+    def GetSidSubAuthority(self, emu, argv, ctx={}):
+        '''
+        PDWORD GetSidSubAuthority(
+          [in] PSID  pSid,
+          [in] DWORD nSubAuthority
+        );
+        '''
+        sid, nsub = argv
+
+        if not sid:
+            sid = self._vibe_token_sid(emu, integrity=True) if hasattr(self, '_vibe_token_sid') else 0
+        return sid + 8 + ((nsub & 0xFF) * 4) if sid else 0
+
+"""
+    if old_sid in text:
+        text = text.replace(old_sid, new_sid, 1)
+    advapi32.write_text(text, encoding="utf-8")
+
+
 def patch_advapi_duplicate_token() -> None:
     advapi32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "advapi32.py"
     text = advapi32.read_text(encoding="utf-8")
@@ -2688,6 +2947,11 @@ def patch_advapi_acl_helpers() -> None:
         if pp:
             self.mem_write(pp, value.to_bytes(emu.get_ptr_size(), 'little'))
 
+    @apihook('IsValidSecurityDescriptor', argc=1, conv=_arch.CALL_CONV_STDCALL)
+    def IsValidSecurityDescriptor(self, emu, argv, ctx={}):
+        pSecurityDescriptor, = argv
+        return 1 if pSecurityDescriptor else 0
+
     @apihook('PrivilegeCheck', argc=3, conv=_arch.CALL_CONV_STDCALL)
     def PrivilegeCheck(self, emu, argv, ctx={}):
         ClientToken, RequiredPrivileges, pfResult = argv
@@ -2696,6 +2960,27 @@ def patch_advapi_acl_helpers() -> None:
                 self.mem_write(pfResult, (1).to_bytes(4, 'little'))
             except Exception:
                 pass
+        return 1
+
+    @apihook('AccessCheck', argc=8, conv=_arch.CALL_CONV_STDCALL)
+    def AccessCheck(self, emu, argv, ctx={}):
+        pSecurityDescriptor, ClientToken, DesiredAccess, GenericMapping, PrivilegeSet, PrivilegeSetLength, GrantedAccess, AccessStatus = argv
+        if PrivilegeSetLength:
+            try:
+                self.mem_write(PrivilegeSetLength, (0).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        if GrantedAccess:
+            try:
+                self.mem_write(GrantedAccess, (DesiredAccess & 0xFFFFFFFF).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        if AccessStatus:
+            try:
+                self.mem_write(AccessStatus, (1).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        emu.set_last_error(windefs.ERROR_SUCCESS)
         return 1
 
     @apihook('InitializeAcl', argc=3, conv=_arch.CALL_CONV_STDCALL)
@@ -3574,6 +3859,192 @@ def patch_advapi_crypto_key_lifecycle() -> None:
     advapi32.write_text(text, encoding="utf-8")
 
 
+def patch_advapi_crypt_release_context_guard() -> None:
+    advapi32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "advapi32.py"
+    text = advapi32.read_text(encoding="utf-8")
+    old = """    @apihook('CryptReleaseContext', argc=2)
+    def CryptReleaseContext(self, emu, argv, ctx={}):
+        '''
+        BOOL CryptReleaseContext(
+            HCRYPTPROV hProv,
+            DWORD      dwFlags
+        );
+        '''
+        hProv, dwFlags = argv
+        rv = True
+
+        cm = emu.get_crypt_manager()
+        cm.crypt_close(hProv)
+
+        return rv
+
+"""
+    new = """    @apihook('CryptReleaseContext', argc=2)
+    def CryptReleaseContext(self, emu, argv, ctx={}):
+        '''
+        BOOL CryptReleaseContext(
+            HCRYPTPROV hProv,
+            DWORD      dwFlags
+        );
+        '''
+        hProv, dwFlags = argv
+        cm = emu.get_crypt_manager()
+        try:
+            cm.crypt_close(hProv)
+        except Exception:
+            # Speakeasy overlay: tolerate release of stale provider handles.
+            pass
+        return True
+
+"""
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif "tolerate release of stale provider handles" not in text:
+        raise RuntimeError(f"CryptReleaseContext patch anchor not found in {advapi32}")
+    advapi32.write_text(text, encoding="utf-8")
+
+
+def patch_kernel32_crypto_forwarders() -> None:
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+
+    marker = "    @apihook('GetComputerName', argc=2)\n"
+    handler = """    def _vibe_kernel32_next_crypt_provider(self):
+        hnd = getattr(self, '_vibe_kernel32_crypt_provider', 0x43525000) + 4
+        self._vibe_kernel32_crypt_provider = hnd
+        return hnd
+
+    def _vibe_kernel32_next_crypt_object(self, name, base):
+        attr = '_vibe_kernel32_crypt_' + name
+        hnd = getattr(self, attr, base) + 4
+        setattr(self, attr, hnd)
+        return hnd
+
+    def _vibe_kernel32_read_optional_string(self, ptr, width):
+        if not ptr:
+            return ''
+        try:
+            return self.read_mem_string(ptr, width)
+        except Exception:
+            return ''
+
+    def _CryptAcquireContext(self, emu, argv, width):
+        phProv, pszContainer, pszProvider, dwProvType, dwFlags = argv
+        argv[1] = self._vibe_kernel32_read_optional_string(pszContainer, width)
+        argv[2] = self._vibe_kernel32_read_optional_string(pszProvider, width)
+        hnd = self._vibe_kernel32_next_crypt_provider()
+        if phProv:
+            try:
+                self.mem_write(phProv, hnd.to_bytes(emu.get_ptr_size(), 'little'))
+            except Exception:
+                pass
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptAcquireContext', argc=5)
+    def CryptAcquireContext(self, emu, argv, ctx={}):
+        return self._CryptAcquireContext(emu, argv, self.get_char_width(ctx))
+
+    @apihook('CryptAcquireContextA', argc=5)
+    def CryptAcquireContextA(self, emu, argv, ctx={}):
+        return self._CryptAcquireContext(emu, argv, 1)
+
+    @apihook('CryptAcquireContextW', argc=5)
+    def CryptAcquireContextW(self, emu, argv, ctx={}):
+        return self._CryptAcquireContext(emu, argv, 2)
+
+    @apihook('CryptReleaseContext', argc=2)
+    def CryptReleaseContext(self, emu, argv, ctx={}):
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptGenRandom', argc=3)
+    def CryptGenRandom(self, emu, argv, ctx={}):
+        hProv, dwLen, pbBuffer = argv
+        size = dwLen & 0xFFFFFFFF
+        if pbBuffer and size:
+            state = getattr(self, '_vibe_kernel32_crypt_random', 0xA5A5A5A5)
+            data = bytearray()
+            for _ in range(size):
+                state = ((state * 1103515245) + 12345) & 0xFFFFFFFF
+                data.append((state >> 16) & 0xFF)
+            self._vibe_kernel32_crypt_random = state
+            self.mem_write(pbBuffer, bytes(data))
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptCreateHash', argc=5)
+    def CryptCreateHash(self, emu, argv, ctx={}):
+        hProv, Algid, hKey, dwFlags, phHash = argv
+        if phHash:
+            hnd = self._vibe_kernel32_next_crypt_object('hash', 0x48415300)
+            try:
+                self.mem_write(phHash, hnd.to_bytes(emu.get_ptr_size(), 'little'))
+            except Exception:
+                pass
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptHashData', argc=4)
+    def CryptHashData(self, emu, argv, ctx={}):
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptGetHashParam', argc=5)
+    def CryptGetHashParam(self, emu, argv, ctx={}):
+        hHash, dwParam, pbData, pdwDataLen, dwFlags = argv
+        if dwParam == 4:
+            blob = (16).to_bytes(4, 'little')
+        elif dwParam == 2:
+            blob = bytes(range(16))
+        else:
+            blob = b'\\x00' * 4
+        if pdwDataLen:
+            try:
+                supplied = int.from_bytes(self.mem_read(pdwDataLen, 4), 'little')
+            except Exception:
+                supplied = len(blob)
+            try:
+                self.mem_write(pdwDataLen, len(blob).to_bytes(4, 'little'))
+            except Exception:
+                pass
+            if pbData and supplied < len(blob):
+                return 0
+        if pbData:
+            try:
+                self.mem_write(pbData, blob)
+            except Exception:
+                pass
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptDestroyHash', argc=1)
+    def CryptDestroyHash(self, emu, argv, ctx={}):
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptDeriveKey', argc=5)
+    def CryptDeriveKey(self, emu, argv, ctx={}):
+        hProv, Algid, hBaseData, dwFlags, phKey = argv
+        if phKey:
+            hnd = self._vibe_kernel32_next_crypt_object('key', 0x4B455900)
+            try:
+                self.mem_write(phKey, hnd.to_bytes(emu.get_ptr_size(), 'little'))
+            except Exception:
+                pass
+        emu.set_last_error(0)
+        return 1
+
+    @apihook('CryptDestroyKey', argc=1)
+    def CryptDestroyKey(self, emu, argv, ctx={}):
+        emu.set_last_error(0)
+        return 1
+
+"""
+    text = _insert_once(text, "def _CryptAcquireContext(", marker, handler, kernel32)
+    kernel32.write_text(text, encoding="utf-8")
+
+
 def patch_advapi_event_and_sddl() -> None:
     advapi32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "advapi32.py"
     text = advapi32.read_text(encoding="utf-8")
@@ -4218,6 +4689,44 @@ def patch_kernel32_drive_strings_and_dll_directory() -> None:
 """
     if old in text:
         text = text.replace(old, new, 1)
+
+    marker = "    @apihook('SetDllDirectory', argc=1)\n"
+    handler = """    @apihook('AddDllDirectory', argc=1)
+    def AddDllDirectory(self, emu, argv, ctx={}):
+        '''
+        DLL_DIRECTORY_COOKIE AddDllDirectory(
+          PCWSTR NewDirectory
+        );
+        '''
+        NewDirectory, = argv
+        directory = ''
+        if NewDirectory:
+            try:
+                directory = self.read_mem_string(NewDirectory, 2)
+                argv[0] = directory
+            except Exception:
+                pass
+        cookie = getattr(self, '_vibe_dll_dir_cookie_next', 0x51000000) + 4
+        self._vibe_dll_dir_cookie_next = cookie
+        dirs = getattr(self, '_vibe_dll_directories', {})
+        dirs[cookie] = directory
+        self._vibe_dll_directories = dirs
+        return cookie
+
+    @apihook('RemoveDllDirectory', argc=1)
+    def RemoveDllDirectory(self, emu, argv, ctx={}):
+        Cookie, = argv
+        getattr(self, '_vibe_dll_directories', {}).pop(Cookie, None)
+        return 1
+
+    @apihook('SetDefaultDllDirectories', argc=1)
+    def SetDefaultDllDirectories(self, emu, argv, ctx={}):
+        DirectoryFlags, = argv
+        self._vibe_default_dll_directories = DirectoryFlags & 0xFFFFFFFF
+        return 1
+
+"""
+    text = _insert_once(text, "def AddDllDirectory(", marker, handler, kernel32)
     kernel32.write_text(text, encoding="utf-8")
 
 
@@ -4555,6 +5064,20 @@ def patch_kernel32_process_id_helpers() -> None:
             pass
         return 1
 
+    @apihook('GetProcessMitigationPolicy', argc=4)
+    def GetProcessMitigationPolicy(self, emu, argv, ctx={}):
+        hProcess, MitigationPolicy, lpBuffer, dwLength = argv
+        if lpBuffer and dwLength:
+            try:
+                self.mem_write(lpBuffer, b'\\x00' * min(dwLength & 0xFFFFFFFF, 0x1000))
+            except Exception:
+                pass
+        try:
+            emu.set_last_error(windefs.ERROR_SUCCESS)
+        except Exception:
+            pass
+        return 1
+
 """
     text = _insert_once(text, "def GetProcessId(", marker, handler, kernel32)
     kernel32.write_text(text, encoding="utf-8")
@@ -4779,6 +5302,30 @@ def patch_kernel32_misc_ordinals() -> None:
     def GetNumberOfFormats(self, emu, argv, ctx={}):
         self._vibe_zero_out_pointer_arg(emu, argv, 4)
         return 0
+
+    @apihook('PrivIsDllSynchronizationHeld', argc=0)
+    def PrivIsDllSynchronizationHeld(self, emu, argv, ctx={}):
+        return 0
+
+    @apihook('PrivIsDllSynchronizationHeldByThread', argc=0)
+    def PrivIsDllSynchronizationHeldByThread(self, emu, argv, ctx={}):
+        return 0
+
+    @apihook('CreateWellKnownSid', argc=4)
+    def CreateWellKnownSid(self, emu, argv, ctx={}):
+        WellKnownSidType, DomainSid, pSid, cbSid = argv
+        sid = b'\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x05' + (18).to_bytes(4, 'little')
+        if cbSid:
+            try:
+                provided = int.from_bytes(self.mem_read(cbSid, 4), 'little')
+            except Exception:
+                provided = len(sid)
+            self.mem_write(cbSid, len(sid).to_bytes(4, 'little'))
+            if provided < len(sid):
+                return 0
+        if pSid:
+            self.mem_write(pSid, sid)
+        return 1
 
 """
     text = _insert_once(text, "def ordinal_1637(", marker, handler, kernel32)
@@ -5631,6 +6178,18 @@ def patch_kernel32_module_handle_aliases() -> None:
     kernel32.write_text(text, encoding="utf-8")
 
 
+def patch_kernel32_get_module_filename_ex_guard() -> None:
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+    old = "            return self.GetModuleFileName(hModule, lpFilename, nSize)\n"
+    new = "            return self.GetModuleFileName(emu, [hModule, lpFilename, nSize], ctx)\n"
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif new not in text:
+        raise RuntimeError(f"GetModuleFileNameExA guard anchor not found in {kernel32}")
+    kernel32.write_text(text, encoding="utf-8")
+
+
 def patch_kernel32_string_aliases() -> None:
     kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
     text = kernel32.read_text(encoding="utf-8")
@@ -5704,6 +6263,113 @@ def patch_kernel32_string_aliases() -> None:
 """
     if old_lstrcat in text:
         text = text.replace(old_lstrcat, new_lstrcat, 1)
+
+    old_lstrcpy = """    @apihook('lstrcpyn', argc=3)
+    def lstrcpyn(self, emu, argv, ctx={}):
+        '''
+        LPSTR lstrcpynA(
+          LPSTR  lpString1,
+          LPCSTR lpString2,
+          int    iMaxLength
+        );
+        '''
+        dest, src, iMaxLength = argv
+
+        cw = self.get_char_width(ctx)
+
+        s = self.read_mem_string(src, cw)
+        argv[1] = s
+        s = s[:iMaxLength - 1]
+        s += '\\x00'
+
+        self.write_mem_string(s, dest, cw)
+        return dest
+
+    @apihook('lstrcpy', argc=2)
+    def lstrcpy(self, emu, argv, ctx={}):
+        '''
+        LPSTR lstrcpyA(
+          LPSTR  lpString1,
+          LPCSTR lpString2
+        );
+        '''
+        dest, src = argv
+
+        cw = self.get_char_width(ctx)
+
+        s = self.read_mem_string(src, cw)
+        argv[1] = s
+        s += '\\x00'
+
+        self.write_mem_string(s, dest, cw)
+        return dest
+
+"""
+    new_lstrcpy = """    def _vibe_lstr_width(self, ctx):
+        try:
+            return self.get_char_width(ctx)
+        except Exception:
+            return 1
+
+    @apihook('lstrcpyn', argc=3)
+    def lstrcpyn(self, emu, argv, ctx={}):
+        '''
+        LPSTR lstrcpynA(
+          LPSTR  lpString1,
+          LPCSTR lpString2,
+          int    iMaxLength
+        );
+        '''
+        dest, src, iMaxLength = argv
+        cw = self._vibe_lstr_width(ctx)
+        try:
+            s = self.read_mem_string(src, cw) if src else ''
+        except Exception:
+            s = ''
+        argv[1] = s
+        limit = max(0, (iMaxLength & 0xFFFFFFFF) - 1)
+        self.write_mem_string(s[:limit], dest, cw)
+        return dest
+
+    @apihook('lstrcpynA', argc=3)
+    def lstrcpynA(self, emu, argv, ctx={}):
+        return self.lstrcpyn(emu, argv, {'func_name': 'lstrcpynA'})
+
+    @apihook('lstrcpynW', argc=3)
+    def lstrcpynW(self, emu, argv, ctx={}):
+        return self.lstrcpyn(emu, argv, {'func_name': 'lstrcpynW'})
+
+    @apihook('lstrcpy', argc=2)
+    def lstrcpy(self, emu, argv, ctx={}):
+        '''
+        LPSTR lstrcpyA(
+          LPSTR  lpString1,
+          LPCSTR lpString2
+        );
+        '''
+        dest, src = argv
+        cw = self._vibe_lstr_width(ctx)
+        try:
+            s = self.read_mem_string(src, cw) if src else ''
+        except Exception:
+            s = ''
+        argv[1] = s
+        self.write_mem_string(s, dest, cw)
+        return dest
+
+    @apihook('lstrcpyA', argc=2)
+    def lstrcpyA(self, emu, argv, ctx={}):
+        return self.lstrcpy(emu, argv, {'func_name': 'lstrcpyA'})
+
+    @apihook('lstrcpyW', argc=2)
+    def lstrcpyW(self, emu, argv, ctx={}):
+        return self.lstrcpy(emu, argv, {'func_name': 'lstrcpyW'})
+
+"""
+    if old_lstrcpy in text:
+        text = text.replace(old_lstrcpy, new_lstrcpy, 1)
+    elif "def _vibe_lstr_width(" not in text:
+        raise RuntimeError(f"lstrcpy/lstrcpyn patch anchor not found in {kernel32}")
 
     marker = "    @apihook('lstrcat', argc=2)\n"
     handler = """    @apihook('RtlMoveMemory', argc=3)
@@ -6046,6 +6712,62 @@ def patch_kernel32_process_memory_guard() -> None:
     kernel32.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def patch_kernel32_virtualalloc_fallback() -> None:
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+    if "Speakeasy overlay: fall back when preferred VirtualAlloc base is unavailable" in text:
+        return
+
+    old = """                emu_perms = self.win_perms_to_emu_perms(flProtect)
+                buf = self.mem_alloc(base=base, size=size, tag=tag_prefix, flags=flProtect,
+                                     perms=emu_perms)
+
+                emu._set_dyn_code_hook(buf, size)
+"""
+    new = """                emu_perms = self.win_perms_to_emu_perms(flProtect)
+                try:
+                    buf = self.mem_alloc(base=base, size=size, tag=tag_prefix, flags=flProtect,
+                                         perms=emu_perms)
+                except Exception:
+                    # Speakeasy overlay: fall back when preferred VirtualAlloc base is unavailable.
+                    buf = self.mem_alloc(size=size, tag=tag_prefix, flags=flProtect,
+                                         perms=emu_perms)
+
+                emu._set_dyn_code_hook(buf, size)
+"""
+    if old not in text:
+        raise RuntimeError(f"VirtualAlloc fallback patch anchor not found in {kernel32}")
+    kernel32.write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
+def patch_kernel32_fastfail_feature_guard() -> None:
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+    if "Speakeasy overlay: fastfail is not emulated" in text:
+        return
+
+    old = """        feature = argv[0]
+        argv[0] = lookup.get(feature, 'PF_UNKNOWN_%s' % (feature & 0xFFFFFFFF))
+        return rv
+"""
+    new = """        feature = argv[0]
+        argv[0] = lookup.get(feature, 'PF_UNKNOWN_%s' % (feature & 0xFFFFFFFF))
+        if feature == 23:
+            # Speakeasy overlay: fastfail is not emulated; avoid int 0x29 paths.
+            return 0
+        return rv
+"""
+    old_alt = """        argv[0] = lookup[argv[0]]
+        return rv
+"""
+    if old in text:
+        kernel32.write_text(text.replace(old, new, 1), encoding="utf-8")
+    elif old_alt in text:
+        kernel32.write_text(text.replace(old_alt, new, 1), encoding="utf-8")
+    else:
+        raise RuntimeError(f"IsProcessorFeaturePresent patch anchor not found in {kernel32}")
+
+
 def patch_kernel32_virtual_lock_helpers() -> None:
     kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
     text = kernel32.read_text(encoding="utf-8")
@@ -6364,6 +7086,21 @@ def patch_kernel32_console_input_helpers() -> None:
         hConsoleHandle, dwMode = argv
         return 1
 
+    @apihook('SetConsoleDisplayMode', argc=3)
+    def SetConsoleDisplayMode(self, emu, argv, ctx={}):
+        hConsoleOutput, dwFlags, lpNewScreenBufferDimensions = argv
+        if lpNewScreenBufferDimensions:
+            try:
+                self.mem_write(lpNewScreenBufferDimensions, (80 | (25 << 16)).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        return 1
+
+    @apihook('SetConsoleCursorPosition', argc=2)
+    def SetConsoleCursorPosition(self, emu, argv, ctx={}):
+        hConsoleOutput, dwCursorPosition = argv
+        return 1
+
     @apihook('GetConsoleMode', argc=2)
     def GetConsoleMode(self, emu, argv, ctx={}):
         hConsoleHandle, lpMode = argv
@@ -6384,6 +7121,33 @@ def patch_kernel32_console_input_helpers() -> None:
                     self.mem_write(lpdwProcessList, (1337).to_bytes(4, 'little'))
                 except Exception:
                     pass
+        emu.set_last_error(windefs.ERROR_SUCCESS)
+        return 1
+
+    @apihook('GetCurrentConsoleFontEx', argc=3)
+    def GetCurrentConsoleFontEx(self, emu, argv, ctx={}):
+        hConsoleOutput, bMaximumWindow, lpConsoleCurrentFontEx = argv
+        if lpConsoleCurrentFontEx:
+            try:
+                face = 'Consolas'.encode('utf-16le') + b'\\x00\\x00'
+                face = face[:64].ljust(64, b'\\x00')
+                data = (
+                    (0x54).to_bytes(4, 'little') +
+                    (0).to_bytes(4, 'little') +
+                    (8 | (16 << 16)).to_bytes(4, 'little') +
+                    (0x36).to_bytes(4, 'little') +
+                    (400).to_bytes(4, 'little') +
+                    face
+                )
+                self.mem_write(lpConsoleCurrentFontEx, data)
+            except Exception:
+                pass
+        emu.set_last_error(windefs.ERROR_SUCCESS)
+        return 1
+
+    @apihook('SetCurrentConsoleFontEx', argc=3)
+    def SetCurrentConsoleFontEx(self, emu, argv, ctx={}):
+        hConsoleOutput, bMaximumWindow, lpConsoleCurrentFontEx = argv
         emu.set_last_error(windefs.ERROR_SUCCESS)
         return 1
 
@@ -6458,6 +7222,34 @@ def patch_kernel32_console_input_helpers() -> None:
     @apihook('WriteConsoleInputW', argc=4)
     def WriteConsoleInputW(self, emu, argv, ctx={}):
         return self.WriteConsoleInput(emu, argv, ctx)
+
+    @apihook('FillConsoleOutputCharacter', argc=5)
+    def FillConsoleOutputCharacter(self, emu, argv, ctx={}):
+        hConsoleOutput, cCharacter, nLength, dwWriteCoord, lpNumberOfCharsWritten = argv
+        if lpNumberOfCharsWritten:
+            try:
+                self.mem_write(lpNumberOfCharsWritten, (nLength & 0xFFFFFFFF).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        return 1
+
+    @apihook('FillConsoleOutputCharacterA', argc=5)
+    def FillConsoleOutputCharacterA(self, emu, argv, ctx={}):
+        return self.FillConsoleOutputCharacter(emu, argv, ctx)
+
+    @apihook('FillConsoleOutputCharacterW', argc=5)
+    def FillConsoleOutputCharacterW(self, emu, argv, ctx={}):
+        return self.FillConsoleOutputCharacter(emu, argv, ctx)
+
+    @apihook('FillConsoleOutputAttribute', argc=5)
+    def FillConsoleOutputAttribute(self, emu, argv, ctx={}):
+        hConsoleOutput, wAttribute, nLength, dwWriteCoord, lpNumberOfAttrsWritten = argv
+        if lpNumberOfAttrsWritten:
+            try:
+                self.mem_write(lpNumberOfAttrsWritten, (nLength & 0xFFFFFFFF).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        return 1
 
 """
     text = _insert_once(text, "def GetNumberOfConsoleInputEvents(", marker, handler, kernel32)
@@ -7223,6 +8015,30 @@ def patch_kernel32_file_api_mode() -> None:
 
 """
     text = _insert_once(text, "def SetFileApisToOEM(", marker, handler, kernel32)
+    kernel32.write_text(text, encoding="utf-8")
+
+
+def patch_kernel32_createfile_open_guard() -> None:
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+    marker = "    @apihook('CreateFile', argc=7)\n"
+    handler = """    def _vibe_file_open_guard(self, emu, target, **kwargs):
+        try:
+            return self.file_open(target, **kwargs)
+        except Exception:
+            handle = getattr(self, '_vibe_file_open_handle', 0x660000)
+            self._vibe_file_open_handle = handle + 4
+            return handle
+
+"""
+    text = _insert_once(text, "def _vibe_file_open_guard(", marker, handler, kernel32)
+    replacements = {
+        "hnd = self.file_open(target, create=True)": "hnd = self._vibe_file_open_guard(emu, target, create=True)",
+        "hnd = self.file_open(target, create=False)": "hnd = self._vibe_file_open_guard(emu, target, create=False)",
+        "hnd = self.file_open(target, create=False, truncate=True)": "hnd = self._vibe_file_open_guard(emu, target, create=False, truncate=True)",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
     kernel32.write_text(text, encoding="utf-8")
 
 
@@ -9857,6 +10673,46 @@ def patch_ntdll_delay_execution() -> None:
 
 """
     text = _insert_once(text, "def NtDelayExecution(", marker, handler, ntdll)
+    ntdll.write_text(text, encoding="utf-8")
+
+
+def patch_ntdll_timer_resolution_helpers() -> None:
+    ntdll = _speakeasy_root() / "winenv" / "api" / "usermode" / "ntdll.py"
+    text = ntdll.read_text(encoding="utf-8")
+    marker = "    @apihook('NtDelayExecution', argc=2)\n"
+    handler = """    def _vibe_write_u32(self, ptr, value):
+        if ptr:
+            try:
+                self.mem_write(ptr, (value & 0xFFFFFFFF).to_bytes(4, 'little'))
+            except Exception:
+                pass
+
+    @apihook('NtQueryTimerResolution', argc=3)
+    def NtQueryTimerResolution(self, emu, argv, ctx={}):
+        MinimumResolution, MaximumResolution, CurrentResolution = argv
+        self._vibe_write_u32(MinimumResolution, 5000)
+        self._vibe_write_u32(MaximumResolution, 156250)
+        self._vibe_write_u32(CurrentResolution, getattr(self, '_vibe_timer_resolution', 10000))
+        return ddk.STATUS_SUCCESS
+
+    @apihook('ZwQueryTimerResolution', argc=3)
+    def ZwQueryTimerResolution(self, emu, argv, ctx={}):
+        return self.NtQueryTimerResolution(emu, argv, ctx)
+
+    @apihook('NtSetTimerResolution', argc=3)
+    def NtSetTimerResolution(self, emu, argv, ctx={}):
+        DesiredResolution, SetResolution, CurrentResolution = argv
+        current = DesiredResolution if SetResolution else 10000
+        self._vibe_timer_resolution = current & 0xFFFFFFFF
+        self._vibe_write_u32(CurrentResolution, self._vibe_timer_resolution)
+        return ddk.STATUS_SUCCESS
+
+    @apihook('ZwSetTimerResolution', argc=3)
+    def ZwSetTimerResolution(self, emu, argv, ctx={}):
+        return self.NtSetTimerResolution(emu, argv, ctx)
+
+"""
+    text = _insert_once(text, "def NtQueryTimerResolution(", marker, handler, ntdll)
     ntdll.write_text(text, encoding="utf-8")
 
 
@@ -12682,6 +13538,58 @@ def patch_ntoskrnl_zw_query_system_information_fallback() -> None:
     ntoskrnl.write_text(text, encoding="utf-8")
 
 
+def patch_ntoskrnl_wide_crt_helpers() -> None:
+    ntoskrnl = _speakeasy_root() / "winenv" / "api" / "kernelmode" / "ntoskrnl.py"
+    text = ntoskrnl.read_text(encoding="utf-8")
+
+    marker = "    @apihook('_stricmp', argc=2, conv=_arch.CALL_CONV_CDECL)\n"
+    handler = """    @apihook('_wcsnset', argc=3, conv=_arch.CALL_CONV_CDECL)
+    def _wcsnset(self, emu, argv, ctx={}):
+        '''
+        wchar_t *_wcsnset(
+            wchar_t *str,
+            wchar_t c,
+            size_t count
+            );
+        '''
+        string, char, count = argv
+        count = min(count & 0xFFFFFFFF, 0x100000)
+        if not string:
+            return 0
+
+        try:
+            text = self.read_wide_string(string)
+        except Exception:
+            text = ''
+        repl = chr(char & 0xFFFF)
+        span = min(len(text), count)
+        out = (repl * span) + text[span:]
+        argv[0] = text
+        argv[1] = repl
+
+        if count:
+            try:
+                self.write_wide_string(out, string)
+            except Exception:
+                pass
+        return string
+
+    @apihook('_wcsset', argc=2, conv=_arch.CALL_CONV_CDECL)
+    def _wcsset(self, emu, argv, ctx={}):
+        string, char = argv
+        if not string:
+            return 0
+        try:
+            count = len(self.read_wide_string(string))
+        except Exception:
+            count = 0
+        return self._wcsnset(emu, [string, char, count], ctx)
+
+"""
+    text = _insert_once(text, "def _wcsnset(", marker, handler, ntoskrnl)
+    ntoskrnl.write_text(text, encoding="utf-8")
+
+
 def patch_rtl_pc_to_file_header() -> None:
     kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
     text = kernel32.read_text(encoding="utf-8")
@@ -12743,7 +13651,12 @@ def patch_kernel32_affinity_and_search_path() -> None:
     text = kernel32.read_text(encoding="utf-8")
 
     marker = "    @apihook('SetPriorityClass', argc=2)\n"
-    handler = """    @apihook('FlushInstructionCache', argc=3)
+    handler = """    @apihook('Beep', argc=2)
+    def Beep(self, emu, argv, ctx={}):
+        dwFreq, dwDuration = argv
+        return 1
+
+    @apihook('FlushInstructionCache', argc=3)
     def FlushInstructionCache(self, emu, argv, ctx={}):
         '''
         BOOL FlushInstructionCache(
@@ -14468,7 +15381,9 @@ def patch_find_file_iteration() -> None:
                 return windefs.INVALID_HANDLE_VALUE
 
         hnd = self.get_handle()
-        self.find_files.update({hnd: {\"search\": srch, \"walker\": fw}})
+        basename = ntpath.basename((srch or '').replace('/', '\\\\')).lower()
+        max_results = 16 if basename in ('*', '*.*') else 64
+        self.find_files.update({hnd: {\"search\": srch, \"walker\": fw, \"seen\": 1, \"max_results\": max_results}})
         argv[1] = self._write_find_data(emu, lpFindFileData, curr_file, cw)
         emu.set_last_error(windefs.ERROR_SUCCESS)
 
@@ -14495,12 +15410,16 @@ def patch_find_file_iteration() -> None:
 
         search = fsearch.get('search', '')
         walker = fsearch.get('walker')
+        if fsearch.get('seen', 0) >= fsearch.get('max_results', 64):
+            emu.set_last_error(windefs.ERROR_NO_MORE_FILES)
+            return 0
         try:
             next_file = self._find_next_matching_file(walker, search)
         except StopIteration:
             emu.set_last_error(windefs.ERROR_NO_MORE_FILES)
             return 0
 
+        fsearch['seen'] = fsearch.get('seen', 0) + 1
         argv[1] = self._write_find_data(emu, lpFindFileData, next_file, cw)
         emu.set_last_error(windefs.ERROR_SUCCESS)
 
@@ -15586,6 +16505,87 @@ def patch_ws2_hostname_aliases() -> None:
     ws2.write_text(text, encoding="utf-8")
 
 
+def patch_ws2_getservbyname_ordinal_55() -> None:
+    ws2 = _speakeasy_root() / "winenv" / "api" / "usermode" / "ws2_32.py"
+    text = ws2.read_text(encoding="utf-8")
+
+    marker = "    @apihook('gethostname', argc=2, ordinal=57)\n"
+    handler = """    @apihook('getservbyname', argc=2, conv=_arch.CALL_CONV_STDCALL, ordinal=55)
+    def getservbyname(self, emu, argv, ctx={}):
+        '''
+        struct servent * getservbyname(
+          const char *name,
+          const char *proto
+        );
+        '''
+        pname, pproto = argv
+        name = ''
+        proto = ''
+        if pname:
+            try:
+                name = self.read_mem_string(pname, 1)
+            except Exception:
+                name = ''
+        if pproto:
+            try:
+                proto = self.read_mem_string(pproto, 1)
+            except Exception:
+                proto = ''
+        argv[0] = name
+        argv[1] = proto
+
+        services = dict(winsock.SERVICE_PORTS)
+        services.update({
+            'domain': 53,
+            'dns': 53,
+            'pop3': 110,
+            'ntp': 123,
+            'imap': 143,
+            'ldap': 389,
+            'smb': 445,
+            'microsoft-ds': 445,
+            'smtp-submission': 587,
+            'ldaps': 636,
+            'imaps': 993,
+            'pop3s': 995,
+            'http-alt': 8080,
+        })
+        port = services.get((name or '').lower())
+        if not port:
+            self.last_error = 11004  # WSANO_DATA
+            return 0
+
+        ptr_size = emu.get_ptr_size()
+        raw_name = (name or '').encode('utf-8', errors='replace') + b'\\x00'
+        raw_proto = (proto or 'tcp').encode('utf-8', errors='replace') + b'\\x00'
+        p_name = self.mem_alloc(len(raw_name), tag='api.ws2_32.servent.name')
+        p_proto = self.mem_alloc(len(raw_proto), tag='api.ws2_32.servent.proto')
+        p_aliases = self.mem_alloc(ptr_size, tag='api.ws2_32.servent.aliases')
+        self.mem_write(p_name, raw_name)
+        self.mem_write(p_proto, raw_proto)
+        self.mem_write(p_aliases, (0).to_bytes(ptr_size, 'little'))
+
+        proto_off = ((ptr_size * 2 + 2 + ptr_size - 1) // ptr_size) * ptr_size
+        struct_size = proto_off + ptr_size
+        p_servent = self.mem_alloc(struct_size, tag='api.ws2_32.servent')
+        data = bytearray(struct_size)
+        data[0:ptr_size] = p_name.to_bytes(ptr_size, 'little')
+        data[ptr_size:ptr_size * 2] = p_aliases.to_bytes(ptr_size, 'little')
+        data[ptr_size * 2:ptr_size * 2 + 2] = htons(port).to_bytes(2, 'little')
+        data[proto_off:proto_off + ptr_size] = p_proto.to_bytes(ptr_size, 'little')
+        self.mem_write(p_servent, bytes(data))
+        self.last_error = windefs.ERROR_SUCCESS
+        return p_servent
+
+    @apihook('ordinal_55', argc=2, conv=_arch.CALL_CONV_STDCALL, ordinal=55)
+    def ordinal_55(self, emu, argv, ctx={}):
+        return self.getservbyname(emu, argv, ctx)
+
+"""
+    text = _insert_once(text, "def getservbyname(", marker, handler, ws2)
+    ws2.write_text(text, encoding="utf-8")
+
+
 def patch_dnsapi_a_record_queries() -> None:
     dnsapi = _speakeasy_root() / "winenv" / "api" / "usermode" / "dnsapi.py"
     text = dnsapi.read_text(encoding="utf-8")
@@ -15697,6 +16697,55 @@ def patch_ws2_getaddrinfo_offline_dns() -> None:
             text = text.replace(old, new, 1)
         elif new not in text:
             raise RuntimeError(f"getaddrinfo patch anchor drifted in {ws2}")
+    marker = "    @apihook('freeaddrinfo', argc=1, ordinal=177)\n"
+    handler = """    def _vibe_temp_ansi_string(self, emu, value, tag):
+        if not value:
+            return 0
+        raw = value.encode('utf-8', errors='replace') + b'\\x00'
+        ptr = self.mem_alloc(len(raw), tag=tag)
+        self.mem_write(ptr, raw)
+        return ptr
+
+    def _vibe_GetAddrInfo(self, emu, argv, width):
+        pNodeName, pServiceName, pHints, ppResult = argv
+        host = ''
+        service = ''
+        if pNodeName:
+            try:
+                host = self.read_mem_string(pNodeName, width)
+            except Exception:
+                host = ''
+        if pServiceName:
+            try:
+                service = self.read_mem_string(pServiceName, width)
+            except Exception:
+                service = ''
+        node = self._vibe_temp_ansi_string(emu, host, 'api.ws2_32.GetAddrInfo.node')
+        svc = self._vibe_temp_ansi_string(emu, service, 'api.ws2_32.GetAddrInfo.service')
+        call_argv = [node, svc, pHints, ppResult]
+        rv = self.getaddrinfo(emu, call_argv, ctx={})
+        argv[0] = host
+        argv[1] = service
+        return rv
+
+    @apihook('GetAddrInfoA', argc=4)
+    def GetAddrInfoA(self, emu, argv, ctx={}):
+        return self._vibe_GetAddrInfo(emu, argv, 1)
+
+    @apihook('GetAddrInfoW', argc=4)
+    def GetAddrInfoW(self, emu, argv, ctx={}):
+        return self._vibe_GetAddrInfo(emu, argv, 2)
+
+    @apihook('FreeAddrInfoA', argc=1)
+    def FreeAddrInfoA(self, emu, argv, ctx={}):
+        return self.freeaddrinfo(emu, argv, ctx)
+
+    @apihook('FreeAddrInfoW', argc=1)
+    def FreeAddrInfoW(self, emu, argv, ctx={}):
+        return self.freeaddrinfo(emu, argv, ctx)
+
+"""
+    text = _insert_once(text, "def GetAddrInfoW(", marker, handler, ws2)
     ws2.write_text(text, encoding="utf-8")
 
 
@@ -16164,6 +17213,124 @@ def patch_urlmon_controlled_downloads() -> None:
         raise RuntimeError(f"URLDownloadToFile patch anchor drifted in {urlmon}")
 
     marker = "    @apihook('URLDownloadToFile', argc=5)\n"
+    stream_handler = """    def _vibe_urlmon_ptr_bytes(self, emu, value):
+        return int(value or 0).to_bytes(emu.get_ptr_size(), 'little')
+
+    def _vibe_urlmon_stub(self, emu, value=0, clean=0):
+        stubs = getattr(self, '_vibe_urlmon_stubs', {})
+        key = (emu.get_ptr_size(), int(value) & 0xFFFFFFFF, int(clean) & 0xFFFF)
+        if key in stubs:
+            return stubs[key]
+        if emu.get_ptr_size() == 8:
+            code = b'\\xb8' + int(value & 0xFFFFFFFF).to_bytes(4, 'little') + b'\\xc3'
+        else:
+            code = (
+                b'\\xb8'
+                + int(value & 0xFFFFFFFF).to_bytes(4, 'little')
+                + b'\\xc2'
+                + int(clean & 0xFFFF).to_bytes(2, 'little')
+            )
+        ptr = self.mem_alloc(len(code), tag='api.urlmon.com_stub')
+        self.mem_write(ptr, code)
+        stubs[key] = ptr
+        self._vibe_urlmon_stubs = stubs
+        return ptr
+
+    def _vibe_urlmon_stream(self, emu):
+        ptr_size = emu.get_ptr_size()
+        vtbl = self.mem_alloc(32 * ptr_size, tag='api.urlmon.IStream.vtbl')
+        obj = self.mem_alloc(ptr_size + 0x80, tag='api.urlmon.IStream')
+        entries = [
+            self._vibe_urlmon_stub(emu, 0x80004002, 12),
+            self._vibe_urlmon_stub(emu, 2, 4),
+            self._vibe_urlmon_stub(emu, 1, 4),
+        ]
+        generic = self._vibe_urlmon_stub(emu, 0, 4)
+        while len(entries) < 32:
+            entries.append(generic)
+        self.mem_write(vtbl, b''.join(self._vibe_urlmon_ptr_bytes(emu, entry) for entry in entries))
+        self.mem_write(obj, self._vibe_urlmon_ptr_bytes(emu, vtbl) + b'URLMON:IStream\\x00')
+        return obj
+
+    def _vibe_urlmon_session(self, emu):
+        ptr_size = emu.get_ptr_size()
+        vtbl = self.mem_alloc(24 * ptr_size, tag='api.urlmon.IInternetSession.vtbl')
+        obj = self.mem_alloc(ptr_size + 0x80, tag='api.urlmon.IInternetSession')
+        entries = [
+            self._vibe_urlmon_stub(emu, 0x80004002, 12),
+            self._vibe_urlmon_stub(emu, 2, 4),
+            self._vibe_urlmon_stub(emu, 1, 4),
+        ]
+        generic = self._vibe_urlmon_stub(emu, 0, 4)
+        while len(entries) < 24:
+            entries.append(generic)
+        self.mem_write(vtbl, b''.join(self._vibe_urlmon_ptr_bytes(emu, entry) for entry in entries))
+        self.mem_write(obj, self._vibe_urlmon_ptr_bytes(emu, vtbl) + b'URLMON:IInternetSession\\x00')
+        return obj
+
+    def _vibe_log_urlmon_url(self, value):
+        try:
+            url = urlparse(value)
+            if url.netloc:
+                ip = self.netman.name_lookup(url.netloc) or self.netman.name_lookup('default') or '10.10.10.10'
+                self.log_dns(url.netloc, ip)
+                port = 443 if url.scheme == 'https' else 80
+                path = url.path or '/'
+                if url.query:
+                    path += '?' + url.query
+                self.log_http(url.netloc, port, headers='GET %s HTTP/1.1\\r\\nHost: %s\\r\\n\\r\\n' % (path, url.netloc), body=b'', secure=(url.scheme == 'https'))
+        except Exception:
+            pass
+
+    @apihook('URLOpenBlockingStream', argc=5)
+    def URLOpenBlockingStream(self, emu, argv, ctx={}):
+        '''
+        HRESULT URLOpenBlockingStream(
+          LPUNKNOWN            pCaller,
+          LPCTSTR              szURL,
+          LPSTREAM             *ppStream,
+          DWORD                dwReserved,
+          LPBINDSTATUSCALLBACK lpfnCB
+        );
+        '''
+        pCaller, szURL, ppStream, dwReserved, lpfnCB = argv
+        if szURL:
+            try:
+                url = self.read_mem_string(szURL, self.get_char_width(ctx))
+                argv[1] = url
+                self._vibe_log_urlmon_url(url)
+            except Exception:
+                pass
+        if ppStream:
+            try:
+                stream = self._vibe_urlmon_stream(emu)
+                self.mem_write(ppStream, stream.to_bytes(emu.get_ptr_size(), 'little'))
+            except Exception:
+                pass
+        return windefs.ERROR_SUCCESS
+
+    @apihook('URLOpenBlockingStreamA', argc=5)
+    def URLOpenBlockingStreamA(self, emu, argv, ctx={}):
+        return self.URLOpenBlockingStream(emu, argv, ctx)
+
+    @apihook('URLOpenBlockingStreamW', argc=5)
+    def URLOpenBlockingStreamW(self, emu, argv, ctx={}):
+        return self.URLOpenBlockingStream(emu, argv, ctx)
+
+    @apihook('CoInternetGetSession', argc=3)
+    def CoInternetGetSession(self, emu, argv, ctx={}):
+        dwSessionMode, ppIInternetSession, dwReserved = argv
+        if ppIInternetSession:
+            try:
+                session = self._vibe_urlmon_session(emu)
+                self.mem_write(ppIInternetSession, session.to_bytes(emu.get_ptr_size(), 'little'))
+            except Exception:
+                pass
+        return windefs.ERROR_SUCCESS
+
+"""
+    text = _insert_once(text, "def URLOpenBlockingStream(", marker, stream_handler, urlmon)
+
     handler = """    @apihook('CoInternetSetFeatureEnabled', argc=3)
     def CoInternetSetFeatureEnabled(self, emu, argv, ctx={}):
         FeatureEntry, dwFlags, fEnable = argv
@@ -18043,10 +19210,43 @@ def patch_user32_char_prev_helpers() -> None:
     text = user32.read_text(encoding="utf-8")
 
     marker = "    @apihook('CharNext', argc=1)\n"
-    handler = """    @apihook('CharPrev', argc=2)
+    handler = """    def _vibe_char_ptr_width(self, ctx, default=1):
+        try:
+            return self.get_char_width(ctx)
+        except Exception:
+            return default
+
+    @apihook('CharNext', argc=1)
+    def CharNext(self, emu, argv, ctx={}):
+        lpsz, = argv
+        if not lpsz:
+            return 0
+        cw = self._vibe_char_ptr_width(ctx)
+        try:
+            raw = self.mem_read(lpsz, cw)
+            if raw == (b'\\x00\\x00' if cw == 2 else b'\\x00'):
+                return lpsz
+        except Exception:
+            pass
+        return lpsz + cw
+
+    @apihook('CharNextA', argc=1)
+    def CharNextA(self, emu, argv, ctx={}):
+        return self.CharNext(emu, argv, {'func_name': 'CharNextA'})
+
+    @apihook('CharNextW', argc=1)
+    def CharNextW(self, emu, argv, ctx={}):
+        return self.CharNext(emu, argv, {'func_name': 'CharNextW'})
+
+    @apihook('CharNextExA', argc=3)
+    def CharNextExA(self, emu, argv, ctx={}):
+        CodePage, lpCurrentChar, dwFlags = argv
+        return self.CharNext(emu, [lpCurrentChar], {'func_name': 'CharNextA'})
+
+    @apihook('CharPrev', argc=2)
     def CharPrev(self, emu, argv, ctx={}):
         lpszStart, lpszCurrent = argv
-        cw = self.get_char_width(ctx)
+        cw = self._vibe_char_ptr_width(ctx)
         if not lpszCurrent:
             return lpszStart
         if lpszStart and lpszCurrent > lpszStart:
@@ -18060,6 +19260,11 @@ def patch_user32_char_prev_helpers() -> None:
     @apihook('CharPrevW', argc=2)
     def CharPrevW(self, emu, argv, ctx={}):
         return self.CharPrev(emu, argv, ctx)
+
+    @apihook('CharPrevExA', argc=4)
+    def CharPrevExA(self, emu, argv, ctx={}):
+        CodePage, lpStart, lpCurrentChar, dwFlags = argv
+        return self.CharPrev(emu, [lpStart, lpCurrentChar], {'func_name': 'CharPrevA'})
 
 """
     text = _insert_once(text, "def CharPrev(", marker, handler, user32)
@@ -18380,6 +19585,35 @@ def patch_user32_system_parameters_and_timeout_box() -> None:
     @apihook('GetDpiForWindow', argc=1)
     def GetDpiForWindow(self, emu, argv, ctx={}):
         return 96
+
+    @apihook('GetSystemMetricsForDpi', argc=2)
+    def GetSystemMetricsForDpi(self, emu, argv, ctx={}):
+        nIndex, dpi = argv
+        if hasattr(self, 'GetSystemMetrics'):
+            try:
+                return self.GetSystemMetrics(emu, [nIndex], ctx)
+            except Exception:
+                pass
+        metrics = {
+            0: 1024,   # SM_CXSCREEN
+            1: 768,    # SM_CYSCREEN
+            2: 17,     # SM_CXVSCROLL
+            3: 17,     # SM_CYHSCROLL
+            4: 23,     # SM_CYCAPTION
+            15: 4,     # SM_CYMENU
+            20: 1,     # SM_MOUSEPRESENT
+            43: 2,     # SM_CMOUSEBUTTONS
+            80: 1,     # SM_CMONITORS
+        }
+        return metrics.get(nIndex & 0xFFFFFFFF, 0)
+
+    @apihook('AdjustWindowRectExForDpi', argc=5)
+    def AdjustWindowRectExForDpi(self, emu, argv, ctx={}):
+        lpRect, dwStyle, bMenu, dwExStyle, dpi = argv
+        try:
+            return self.AdjustWindowRectEx(emu, [lpRect, dwStyle, bMenu, dwExStyle], ctx)
+        except Exception:
+            return 1
 
     @apihook('SetThreadDpiHostingBehavior', argc=1)
     def SetThreadDpiHostingBehavior(self, emu, argv, ctx={}):
@@ -18727,6 +19961,10 @@ def patch_user32_system_menu() -> None:
         self._vibe_menus = menus
         return handle
 
+    @apihook('CreateMenu', argc=0)
+    def CreateMenu(self, emu, argv, ctx={}):
+        return self.CreatePopupMenu(emu, argv, ctx)
+
     @apihook('DestroyMenu', argc=1)
     def DestroyMenu(self, emu, argv, ctx={}):
         hMenu, = argv
@@ -18835,6 +20073,46 @@ def patch_user32_system_menu() -> None:
 
 """
     text = _insert_once(text, "def GetSystemMenu(", marker, handler, user32)
+    user32.write_text(text, encoding="utf-8")
+
+
+def patch_user32_defer_window_pos_helpers() -> None:
+    user32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "user32.py"
+    text = user32.read_text(encoding="utf-8")
+
+    marker = "    @apihook('SetWindowPos', argc=7)\n"
+    handler = """    def _vibe_defer_window_handle(self):
+        handle = getattr(self, '_vibe_defer_window_next', 0x77030000) + 4
+        self._vibe_defer_window_next = handle
+        return handle
+
+    @apihook('BeginDeferWindowPos', argc=1)
+    def BeginDeferWindowPos(self, emu, argv, ctx={}):
+        nNumWindows, = argv
+        handle = self._vibe_defer_window_handle()
+        batches = getattr(self, '_vibe_defer_window_batches', {})
+        batches[handle] = []
+        self._vibe_defer_window_batches = batches
+        return handle
+
+    @apihook('DeferWindowPos', argc=8)
+    def DeferWindowPos(self, emu, argv, ctx={}):
+        hWinPosInfo, hWnd, hWndInsertAfter, x, y, cx, cy, uFlags = argv
+        handle = hWinPosInfo or self._vibe_defer_window_handle()
+        batches = getattr(self, '_vibe_defer_window_batches', {})
+        batch = batches.setdefault(handle, [])
+        batch.append((hWnd, hWndInsertAfter, x, y, cx, cy, uFlags))
+        self._vibe_defer_window_batches = batches
+        return handle
+
+    @apihook('EndDeferWindowPos', argc=1)
+    def EndDeferWindowPos(self, emu, argv, ctx={}):
+        hWinPosInfo, = argv
+        getattr(self, '_vibe_defer_window_batches', {}).pop(hWinPosInfo, None)
+        return 1
+
+"""
+    text = _insert_once(text, "def BeginDeferWindowPos(", marker, handler, user32)
     user32.write_text(text, encoding="utf-8")
 
 
@@ -19935,6 +21213,50 @@ def patch_user32_gui_misc() -> None:
     def SetDlgItemTextW(self, emu, argv, ctx={}):
         return self.SetDlgItemText(emu, argv, ctx)
 
+    @apihook('SendDlgItemMessage', argc=5)
+    def SendDlgItemMessage(self, emu, argv, ctx={}):
+        hDlg, nIDDlgItem, Msg, wParam, lParam = argv
+        msg = Msg & 0xFFFFFFFF
+        # WM_SETTEXT
+        if msg == 0x000C and lParam:
+            try:
+                argv[4] = self.read_mem_string(lParam, self.get_char_width(ctx))
+            except Exception:
+                pass
+            return 1
+        # WM_GETTEXT
+        if msg == 0x000D:
+            if lParam and wParam:
+                try:
+                    self.write_mem_string('', lParam, self.get_char_width(ctx))
+                except Exception:
+                    pass
+            return 0
+        # BM_GETCHECK/BM_SETCHECK and most simple control messages can safely
+        # return zero in this headless user32 model.
+        return 0
+
+    @apihook('SendDlgItemMessageA', argc=5)
+    def SendDlgItemMessageA(self, emu, argv, ctx={}):
+        return self.SendDlgItemMessage(emu, argv, ctx)
+
+    @apihook('SendDlgItemMessageW', argc=5)
+    def SendDlgItemMessageW(self, emu, argv, ctx={}):
+        return self.SendDlgItemMessage(emu, argv, ctx)
+
+    @apihook('IsDialogMessage', argc=2)
+    def IsDialogMessage(self, emu, argv, ctx={}):
+        hDlg, lpMsg = argv
+        return 0
+
+    @apihook('IsDialogMessageA', argc=2)
+    def IsDialogMessageA(self, emu, argv, ctx={}):
+        return self.IsDialogMessage(emu, argv, ctx)
+
+    @apihook('IsDialogMessageW', argc=2)
+    def IsDialogMessageW(self, emu, argv, ctx={}):
+        return self.IsDialogMessage(emu, argv, ctx)
+
     @apihook('SetParent', argc=2)
     def SetParent(self, emu, argv, ctx={}):
         hWndChild, hWndNewParent = argv
@@ -20272,6 +21594,12 @@ def patch_user32_input_state_helpers() -> None:
     def GetQueueStatus(self, emu, argv, ctx={}):
         return 0
 
+    @apihook('GetMessagePos', argc=0)
+    def GetMessagePos(self, emu, argv, ctx={}):
+        x = 512 & 0xFFFF
+        y = 384 & 0xFFFF
+        return (y << 16) | x
+
     @apihook('GetKeyState', argc=1)
     def GetKeyState(self, emu, argv, ctx={}):
         nVirtKey, = argv
@@ -20296,6 +21624,10 @@ def patch_user32_input_state_helpers() -> None:
     @apihook('SetKeyboardState', argc=1)
     def SetKeyboardState(self, emu, argv, ctx={}):
         return 1
+
+    @apihook('WaitForInputIdle', argc=2)
+    def WaitForInputIdle(self, emu, argv, ctx={}):
+        return 0
 
     @apihook('RegisterDeviceNotification', argc=3)
     def RegisterDeviceNotification(self, emu, argv, ctx={}):
@@ -21792,6 +23124,55 @@ def patch_shlwapi_string_number_helpers() -> None:
         idx = text.find(ch)
         return pszStart + (idx * 2) if idx >= 0 else 0
 
+    def _vibe_str_cpy(self, argv, width):
+        pszDst, pszSrc = argv
+        try:
+            text = self.read_mem_string(pszSrc, width) if pszSrc else ''
+        except Exception:
+            text = ''
+        argv[1] = text
+        if pszDst:
+            try:
+                self.write_mem_string(text, pszDst, width)
+            except Exception:
+                pass
+        return pszDst
+
+    @apihook('StrCpyA', argc=2)
+    def StrCpyA(self, emu, argv, ctx={}):
+        return self._vibe_str_cpy(argv, 1)
+
+    @apihook('StrCpyW', argc=2)
+    def StrCpyW(self, emu, argv, ctx={}):
+        return self._vibe_str_cpy(argv, 2)
+
+    def _vibe_str_cat(self, argv, width):
+        pszDst, pszSrc = argv
+        try:
+            left = self.read_mem_string(pszDst, width) if pszDst else ''
+        except Exception:
+            left = ''
+        try:
+            right = self.read_mem_string(pszSrc, width) if pszSrc else ''
+        except Exception:
+            right = ''
+        argv[0] = left
+        argv[1] = right
+        if pszDst:
+            try:
+                self.write_mem_string(left + right, pszDst, width)
+            except Exception:
+                pass
+        return pszDst
+
+    @apihook('StrCatA', argc=2)
+    def StrCatA(self, emu, argv, ctx={}):
+        return self._vibe_str_cat(argv, 1)
+
+    @apihook('StrCatW', argc=2)
+    def StrCatW(self, emu, argv, ctx={}):
+        return self._vibe_str_cat(argv, 2)
+
     def _vibe_str_cmp(self, argv, width, max_chars=None, ignore_case=False):
         try:
             left = self.read_mem_string(argv[0], width) if argv[0] else ''
@@ -23037,6 +24418,21 @@ def patch_gdi32_create_font_indirect() -> None:
                 pass
         return 1
 
+    @apihook('TranslateCharsetInfo', argc=3)
+    def TranslateCharsetInfo(self, emu, argv, ctx={}):
+        lpSrc, lpCs, dwFlags = argv
+        if lpCs:
+            try:
+                # CHARSETINFO: ciCharset, ciACP, fs. Use ANSI_CHARSET/1252
+                # with a conservative non-zero signature bit.
+                data = (0).to_bytes(4, 'little')
+                data += (1252).to_bytes(4, 'little')
+                data += (1).to_bytes(4, 'little')
+                self.mem_write(lpCs, data)
+            except Exception:
+                pass
+        return 1
+
     def _vibe_font_data_blob(self):
         # Minimal sfnt-like header. This is not a real font; it is enough for
         # size probes and callers that check for non-empty font table data.
@@ -23248,8 +24644,9 @@ def patch_gdi32_stock_objects() -> None:
     gdi32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "gdi32.py"
     text = gdi32.read_text(encoding="utf-8")
 
-    marker = "    @apihook('CreateCompatibleDC', argc=1)\n"
-    handler = """    def _vibe_gdi_object_ptr(self, emu, key, kind=0):
+    if "def _vibe_gdi_object_ptr(" not in text:
+        marker = "    @apihook('GetStockObject', argc=1)\n"
+        helper = """    def _vibe_gdi_object_ptr(self, emu, key, kind=0):
         objects = getattr(self, '_vibe_gdi_objects', {})
         if key in objects:
             return objects[key]
@@ -23270,33 +24667,67 @@ def patch_gdi32_stock_objects() -> None:
         self._vibe_gdi_objects = objects
         return ptr
 
-    @apihook('GetStockObject', argc=1)
+"""
+        if marker not in text:
+            raise RuntimeError(f"GDI32 stock helper anchor not found in {gdi32}")
+        text = text.replace(marker, helper + marker, 1)
+
+    old_get_stock = """    @apihook('GetStockObject', argc=1)
     def GetStockObject(self, emu, argv, ctx={}):
-        '''
+        \"\"\"
         HGDIOBJ GetStockObject(
-          int i
+            int i
         );
-        '''
+        \"\"\"
+        return 0
+"""
+    new_get_stock = """    @apihook('GetStockObject', argc=1)
+    def GetStockObject(self, emu, argv, ctx={}):
+        \"\"\"
+        HGDIOBJ GetStockObject(
+            int i
+        );
+        \"\"\"
         index, = argv
         index &= 0xFFFFFFFF
         # Common stock indexes: WHITE_BRUSH=0, BLACK_PEN=7,
         # SYSTEM_FONT=13, DEFAULT_GUI_FONT=17.
         kind = 6 if index in (13, 17) else (2 if index <= 4 else 1)
         return self._vibe_gdi_object_ptr(emu, ('stock', index), kind)
+"""
+    if old_get_stock in text:
+        text = text.replace(old_get_stock, new_get_stock, 1)
+    elif "return self._vibe_gdi_object_ptr(emu, ('stock', index), kind)" not in text:
+        raise RuntimeError(f"GDI32 GetStockObject anchor not found in {gdi32}")
 
-    @apihook('SelectObject', argc=2)
+    old_select = """    @apihook('SelectObject', argc=2)
     def SelectObject(self, emu, argv, ctx={}):
+        \"\"\"
+        HGDIOBJ SelectObject(
+          HDC     hdc,
+          HGDIOBJ h
+        );
+        \"\"\"
+        return 0
+"""
+    new_select = """    @apihook('SelectObject', argc=2)
+    def SelectObject(self, emu, argv, ctx={}):
+        \"\"\"
+        HGDIOBJ SelectObject(
+          HDC     hdc,
+          HGDIOBJ h
+        );
+        \"\"\"
         hdc, h = argv
         old = getattr(self, '_vibe_selected_gdi_object', 0)
         self._vibe_selected_gdi_object = h
         return old or self._vibe_gdi_object_ptr(emu, ('stock', 17), 6)
-
-    @apihook('DeleteObject', argc=1)
-    def DeleteObject(self, emu, argv, ctx={}):
-        return 1
-
 """
-    text = _insert_once(text, "def GetStockObject(", marker, handler, gdi32)
+    if old_select in text:
+        text = text.replace(old_select, new_select, 1)
+    elif "_vibe_selected_gdi_object" not in text:
+        raise RuntimeError(f"GDI32 SelectObject anchor not found in {gdi32}")
+
     gdi32.write_text(text, encoding="utf-8")
 
 
@@ -24590,7 +26021,18 @@ def patch_msvcrt_file_stdio() -> None:
         return files
 
     def _vibe_crt_seed_data(self, path):
+        import os
         p = (path or '').replace('/', '\\\\').lower()
+        if p.endswith('\\\\sample.bin') or p.endswith('\\\\sample.exe'):
+            for candidate in (os.environ.get('SPEAKEASY_SAMPLE_FILE'), '/tmp/sample.bin', '/tmp/sample.exe'):
+                if not candidate:
+                    continue
+                try:
+                    with open(candidate, 'rb') as fh:
+                        # Speakeasy overlay: model self-opened sample files.
+                        return fh.read(64 * 1024 * 1024)
+                except Exception:
+                    pass
         if p.endswith('\\\\drivers\\\\etc\\\\hosts') or p.endswith('\\\\hosts'):
             return b'127.0.0.1 localhost\\r\\n::1 localhost\\r\\n'
         if p.endswith('\\\\win.ini'):
@@ -25218,6 +26660,25 @@ def patch_msvcrt_file_stdio() -> None:
         data = self._vibe_crt_read_line(stream, 1)
         return data[0] if data else 0x0A
 
+    @apihook('_filbuf', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def _filbuf(self, emu, argv, ctx={}):
+        return self.fgetc(emu, argv, ctx)
+
+    @apihook('ungetc', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def ungetc(self, emu, argv, ctx={}):
+        char, stream = argv
+        if char in (-1, 0xFFFFFFFF):
+            return -1
+        f = self._vibe_crt_files().get(stream)
+        if f:
+            pos = f.get('pos', 0)
+            if pos > 0:
+                f['pos'] = pos - 1
+            else:
+                f['data'] = bytes([char & 0xFF]) + f.get('data', b'')
+                f['pos'] = 0
+        return char & 0xFF
+
     @apihook('getc', argc=1, conv=e_arch.CALL_CONV_CDECL)
     def getc(self, emu, argv, ctx={}):
         return self.fgetc(emu, argv, ctx)
@@ -25748,8 +27209,101 @@ def patch_msvcrt_string_compare_helpers() -> None:
             return 0
         return self._vibe_byte_compare(b1, b2)
 
+    @apihook('_strrev', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def _strrev(self, emu, argv, ctx={}):
+        string, = argv
+        raw = self._vibe_read_nul_bytes(string, 0x100000)
+        if string:
+            try:
+                self.mem_write(string, raw[::-1] + b'\\x00')
+            except Exception:
+                pass
+        argv[0] = raw.decode('utf-8', errors='ignore')
+        return string
+
+    @apihook('strrev', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def strrev(self, emu, argv, ctx={}):
+        return self._strrev(emu, argv, ctx)
+
+    def _vibe_strcase_inplace(self, ptr, upper=False):
+        raw = self._vibe_read_nul_bytes(ptr, 0x100000)
+        new = raw.upper() if upper else raw.lower()
+        if ptr:
+            try:
+                self.mem_write(ptr, new + b'\\x00')
+            except Exception:
+                pass
+        return ptr
+
+    @apihook('_strlwr', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def _strlwr(self, emu, argv, ctx={}):
+        string, = argv
+        return self._vibe_strcase_inplace(string, upper=False)
+
+    @apihook('strlwr', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def strlwr(self, emu, argv, ctx={}):
+        return self._strlwr(emu, argv, ctx)
+
+    @apihook('_strupr', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def _strupr(self, emu, argv, ctx={}):
+        string, = argv
+        return self._vibe_strcase_inplace(string, upper=True)
+
+    @apihook('strupr', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def strupr(self, emu, argv, ctx={}):
+        return self._strupr(emu, argv, ctx)
+
 """
     text = _insert_once(text, "def _strnicmp(", marker, handler, msvcrt)
+    msvcrt.write_text(text, encoding="utf-8")
+
+
+def patch_msvcrt_strchr_guards() -> None:
+    msvcrt = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcrt.py"
+    text = msvcrt.read_text(encoding="utf-8")
+    if "Speakeasy overlay: guarded strchr/strrchr" in text:
+        return
+
+    def replace_hook(src: str, hook: str, block: str) -> str:
+        marker = f"    @apihook('{hook}',"
+        start = src.find(marker)
+        if start < 0:
+            raise RuntimeError(f"{hook} patch anchor not found in {msvcrt}")
+        next_start = src.find("\n    @apihook(", start + len(marker))
+        if next_start < 0:
+            raise RuntimeError(f"{hook} patch end not found in {msvcrt}")
+        return src[:start] + block + src[next_start + 1:]
+
+    strchr = """    @apihook('strchr', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def strchr(self, emu, argv, ctx={}):
+        # Speakeasy overlay: guarded strchr/strrchr.
+        string, c = argv
+        try:
+            text = self.read_mem_string(string, 1) if string else ''
+        except Exception:
+            text = ''
+        needle = chr(c & 0xFF)
+        pos = text.find(needle)
+        argv[0] = text
+        return string + pos if string and pos >= 0 else 0
+
+"""
+    strrchr = """    @apihook('strrchr', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def strrchr(self, emu, argv, ctx={}):
+        # Speakeasy overlay: guarded strchr/strrchr.
+        string, c = argv
+        try:
+            text = self.read_mem_string(string, 1) if string else ''
+        except Exception:
+            text = ''
+        needle = chr(c & 0xFF)
+        pos = text.rfind(needle)
+        argv[0] = text
+        return string + pos if string and pos >= 0 else 0
+
+"""
+    text = replace_hook(text, "strchr", strchr)
+    text = replace_hook(text, "strrchr", strrchr)
     msvcrt.write_text(text, encoding="utf-8")
 
 
@@ -25782,6 +27336,30 @@ def patch_msvcrt_multibyte_string_helpers() -> None:
             pass
         return dest
 
+    @apihook('_mbsstr', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def _mbsstr(self, emu, argv, ctx={}):
+        haystack, needle = argv
+        h = self._vibe_mbs_read(haystack)
+        n = self._vibe_mbs_read(needle)
+        if needle and not n:
+            return haystack
+        off = h.find(n)
+        return haystack + off if off >= 0 else 0
+
+    @apihook('_mbschr', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def _mbschr(self, emu, argv, ctx={}):
+        string, char = argv
+        raw = self._vibe_mbs_read(string)
+        off = raw.find(bytes([char & 0xFF]))
+        return string + off if string and off >= 0 else 0
+
+    @apihook('_mbsrchr', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def _mbsrchr(self, emu, argv, ctx={}):
+        string, char = argv
+        raw = self._vibe_mbs_read(string)
+        off = raw.rfind(bytes([char & 0xFF]))
+        return string + off if string and off >= 0 else 0
+
     @apihook('_mbscpy', argc=2, conv=e_arch.CALL_CONV_CDECL)
     def _mbscpy(self, emu, argv, ctx={}):
         dest, src = argv
@@ -25807,25 +27385,46 @@ def patch_msvcrt_multibyte_string_helpers() -> None:
         right = self._vibe_mbs_read(src, count)[:min(count & 0xFFFFFFFF, 0x100000)]
         return self._vibe_mbs_write(dest, left + right)
 
-    @apihook('_mbsnbcmp', argc=3, conv=e_arch.CALL_CONV_CDECL)
-    def _mbsnbcmp(self, emu, argv, ctx={}):
-        s1, s2, count = argv
-        count = min(count & 0xFFFFFFFF, 0x100000)
-        b1 = self._vibe_mbs_read(s1, count)[:count]
-        b2 = self._vibe_mbs_read(s2, count)[:count]
+    def _vibe_mbs_compare(self, left, right, count=None, fold=False):
+        limit = 0x100000 if count is None else min(count & 0xFFFFFFFF, 0x100000)
+        b1 = self._vibe_mbs_read(left, limit)[:limit]
+        b2 = self._vibe_mbs_read(right, limit)[:limit]
+        if fold:
+            b1 = b1.lower()
+            b2 = b2.lower()
         if b1 == b2:
             return 0
         return 1 if b1 > b2 else -1
 
+    @apihook('_mbscmp', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def _mbscmp(self, emu, argv, ctx={}):
+        s1, s2 = argv
+        return self._vibe_mbs_compare(s1, s2)
+
+    @apihook('_mbsicmp', argc=2, conv=e_arch.CALL_CONV_CDECL)
+    def _mbsicmp(self, emu, argv, ctx={}):
+        s1, s2 = argv
+        return self._vibe_mbs_compare(s1, s2, fold=True)
+
+    @apihook('_mbsncmp', argc=3, conv=e_arch.CALL_CONV_CDECL)
+    def _mbsncmp(self, emu, argv, ctx={}):
+        s1, s2, count = argv
+        return self._vibe_mbs_compare(s1, s2, count=count)
+
+    @apihook('_mbsnicmp', argc=3, conv=e_arch.CALL_CONV_CDECL)
+    def _mbsnicmp(self, emu, argv, ctx={}):
+        s1, s2, count = argv
+        return self._vibe_mbs_compare(s1, s2, count=count, fold=True)
+
+    @apihook('_mbsnbcmp', argc=3, conv=e_arch.CALL_CONV_CDECL)
+    def _mbsnbcmp(self, emu, argv, ctx={}):
+        s1, s2, count = argv
+        return self._vibe_mbs_compare(s1, s2, count=count)
+
     @apihook('_mbsnbicmp', argc=3, conv=e_arch.CALL_CONV_CDECL)
     def _mbsnbicmp(self, emu, argv, ctx={}):
         s1, s2, count = argv
-        count = min(count & 0xFFFFFFFF, 0x100000)
-        b1 = self._vibe_mbs_read(s1, count)[:count].lower()
-        b2 = self._vibe_mbs_read(s2, count)[:count].lower()
-        if b1 == b2:
-            return 0
-        return 1 if b1 > b2 else -1
+        return self._vibe_mbs_compare(s1, s2, count=count, fold=True)
 
 """
     text = _insert_once(text, "def _mbsnbcpy(", marker, handler, msvcrt)
@@ -26467,6 +28066,20 @@ def patch_msvcrt_wide_printf_helpers() -> None:
         buffer, numberOfElements, fmt = argv[:3]
         return self._vibe_wide_printf(emu, buffer, numberOfElements, fmt)
 
+    @apihook('swprintf', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def swprintf(self, emu, argv, ctx={}):
+        padded = list(argv) + [0] * max(0, 3 - len(argv))
+        buffer, second, third = padded[:3]
+        fmt = second
+        count = 0x1000
+        try:
+            self.read_mem_string(second, 2)
+        except Exception:
+            if third:
+                fmt = third
+                count = second
+        return self._vibe_wide_printf(emu, buffer, count, fmt)
+
     @apihook('_vscwprintf', argc=2, conv=e_arch.CALL_CONV_CDECL)
     def _vscwprintf(self, emu, argv, ctx={}):
         fmt, argptr = argv
@@ -26747,6 +28360,28 @@ def patch_msvcrt_wide_string_helpers() -> None:
                 pass
         return dst
 
+    def _vibe_write_wide_string(self, dst, text):
+        if dst:
+            try:
+                self.mem_write(dst, text.encode('utf-16le') + b'\\x00\\x00')
+            except Exception:
+                pass
+        return dst
+
+    @apihook('_wcsupr', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def _wcsupr(self, emu, argv, ctx={}):
+        dst, = argv
+        text = self._vibe_wide_string(dst)
+        argv[0] = text
+        return self._vibe_write_wide_string(dst, text.upper())
+
+    @apihook('_wcslwr', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def _wcslwr(self, emu, argv, ctx={}):
+        dst, = argv
+        text = self._vibe_wide_string(dst)
+        argv[0] = text
+        return self._vibe_write_wide_string(dst, text.lower())
+
     @apihook('_wcsupr_s', argc=2, conv=e_arch.CALL_CONV_CDECL)
     def _wcsupr_s(self, emu, argv, ctx={}):
         dst, count = argv
@@ -26911,6 +28546,10 @@ def patch_msvcrt_x87_math_helpers() -> None:
 
     @apihook('_CIlog10', argc=0, conv=e_arch.CALL_CONV_CDECL)
     def _CIlog10(self, emu, argv, ctx={}):
+        return 0
+
+    @apihook('log10', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def log10(self, emu, argv, ctx={}):
         return 0
 
     @apihook('_CIexp', argc=0, conv=e_arch.CALL_CONV_CDECL)
@@ -28204,6 +29843,53 @@ def patch_mscoree_clr_create_instance() -> None:
 def patch_imagehlp_module() -> None:
     imagehlp = _speakeasy_root() / "winenv" / "api" / "usermode" / "imagehlp.py"
     if imagehlp.is_file() and "class Imagehlp" in imagehlp.read_text(encoding="utf-8", errors="replace"):
+        text = imagehlp.read_text(encoding="utf-8", errors="replace")
+        marker = "    @apihook('ImageDirectoryEntryToData', argc=4)\n"
+        handler = """    @apihook('MapAndLoad', argc=5)
+    def MapAndLoad(self, emu, argv, ctx={}):
+        ImageName, DllPath, LoadedImage, DotDll, ReadOnly = argv
+        if ImageName:
+            try:
+                argv[0] = self.read_mem_string(ImageName, 1)
+            except Exception:
+                pass
+        if DllPath:
+            try:
+                argv[1] = self.read_mem_string(DllPath, 1)
+            except Exception:
+                pass
+        if LoadedImage:
+            try:
+                self.mem_write(LoadedImage, b'\\x00' * 0x80)
+            except Exception:
+                pass
+        return 1
+
+    @apihook('UnMapAndLoad', argc=1)
+    def UnMapAndLoad(self, emu, argv, ctx={}):
+        return 1
+
+"""
+        bind_handler = """    @apihook('BindImageEx', argc=5)
+    def BindImageEx(self, emu, argv, ctx={}):
+        Flags, ImageName, DllPath, SymbolPath, StatusRoutine = argv
+        for idx in (1, 2, 3):
+            if argv[idx]:
+                try:
+                    argv[idx] = self.read_mem_string(argv[idx], 1)
+                except Exception:
+                    pass
+        return 1
+
+    @apihook('BindImage', argc=3)
+    def BindImage(self, emu, argv, ctx={}):
+        ImageName, DllPath, SymbolPath = argv
+        return self.BindImageEx(emu, [0, ImageName, DllPath, SymbolPath, 0], ctx)
+
+"""
+        text = _insert_once(text, "def MapAndLoad(", marker, handler, imagehlp)
+        text = _insert_once(text, "def BindImageEx(", marker, bind_handler, imagehlp)
+        imagehlp.write_text(text, encoding="utf-8")
         return
 
     imagehlp.write_text("""# Speakeasy overlay: minimal imagehlp.dll support.
@@ -28220,6 +29906,46 @@ class Imagehlp(api.ApiHandler):
         self.funcs = {}
         self.data = {}
         super(Imagehlp, self).__get_hook_attrs__(self)
+
+    @apihook('MapAndLoad', argc=5)
+    def MapAndLoad(self, emu, argv, ctx={}):
+        ImageName, DllPath, LoadedImage, DotDll, ReadOnly = argv
+        if ImageName:
+            try:
+                argv[0] = self.read_mem_string(ImageName, 1)
+            except Exception:
+                pass
+        if DllPath:
+            try:
+                argv[1] = self.read_mem_string(DllPath, 1)
+            except Exception:
+                pass
+        if LoadedImage:
+            try:
+                self.mem_write(LoadedImage, b'\\x00' * 0x80)
+            except Exception:
+                pass
+        return 1
+
+    @apihook('UnMapAndLoad', argc=1)
+    def UnMapAndLoad(self, emu, argv, ctx={}):
+        return 1
+
+    @apihook('BindImageEx', argc=5)
+    def BindImageEx(self, emu, argv, ctx={}):
+        Flags, ImageName, DllPath, SymbolPath, StatusRoutine = argv
+        for idx in (1, 2, 3):
+            if argv[idx]:
+                try:
+                    argv[idx] = self.read_mem_string(argv[idx], 1)
+                except Exception:
+                    pass
+        return 1
+
+    @apihook('BindImage', argc=3)
+    def BindImage(self, emu, argv, ctx={}):
+        ImageName, DllPath, SymbolPath = argv
+        return self.BindImageEx(emu, [0, ImageName, DllPath, SymbolPath, 0], ctx)
 
     @apihook('MakeSureDirectoryPathExists', argc=1)
     def MakeSureDirectoryPathExists(self, emu, argv, ctx={}):
@@ -28478,6 +30204,41 @@ class Wevtapi(api.ApiHandler):
     @apihook('EvtOpenLog', argc=3)
     def EvtOpenLog(self, emu, argv, ctx={}):
         return self._handle()
+
+    @apihook('EvtOpenChannelConfig', argc=3)
+    def EvtOpenChannelConfig(self, emu, argv, ctx={}):
+        return self._handle()
+
+    @apihook('EvtSaveChannelConfig', argc=2)
+    def EvtSaveChannelConfig(self, emu, argv, ctx={}):
+        return 1
+
+    @apihook('EvtSetChannelConfigProperty', argc=4)
+    def EvtSetChannelConfigProperty(self, emu, argv, ctx={}):
+        return 1
+
+    @apihook('EvtGetChannelConfigProperty', argc=6)
+    def EvtGetChannelConfigProperty(self, emu, argv, ctx={}):
+        ChannelConfig, PropertyId, Flags, PropertyValueBufferSize, PropertyValueBuffer, PropertyValueBufferUsed = argv
+        self._write_dword(PropertyValueBufferUsed, 0)
+        if PropertyValueBuffer and PropertyValueBufferSize:
+            try:
+                self.mem_write(PropertyValueBuffer, b'\\x00' * min(PropertyValueBufferSize & 0xFFFFFFFF, 16))
+            except Exception:
+                pass
+        return 1
+
+    @apihook('EvtOpenPublisherMetadata', argc=5)
+    def EvtOpenPublisherMetadata(self, emu, argv, ctx={}):
+        return self._handle()
+
+    @apihook('EvtFormatMessage', argc=9)
+    def EvtFormatMessage(self, emu, argv, ctx={}):
+        PublisherMetadata, Event, MessageId, ValueCount, Values, Flags, BufferSize, Buffer, BufferUsed = (
+            argv + [0, 0]
+        )[:9]
+        self._write_dword(BufferUsed, 0)
+        return 1
 
     @apihook('EvtClose', argc=1)
     def EvtClose(self, emu, argv, ctx={}):
@@ -30723,7 +32484,7 @@ def patch_winemu_kuser_shared_data() -> None:
         put32(0x26C, 10)     # NtMajorVersion.
         put32(0x270, 0)      # NtMinorVersion.
         # ProcessorFeatures[64], common user-mode-visible capabilities.
-        for idx in (0, 1, 2, 3, 6, 8, 9, 10, 12, 13, 17, 20, 23, 27, 28, 34, 36, 39):
+        for idx in (0, 1, 2, 3, 6, 8, 9, 10, 12, 13, 17, 20, 27, 28, 34, 36, 39):
             data[0x274 + idx] = 1
         data[0x2D4] = 0      # KdDebuggerEnabled: debugger absent.
         data[0x2D5] = 0      # Mitigation policy bits: avoid sandbox-looking strictness.
@@ -33844,6 +35605,15 @@ class Irrlicht(api.ApiHandler):
 def patch_unityplayer_module() -> None:
     unity = _speakeasy_root() / "winenv" / "api" / "usermode" / "unityplayer.py"
     if unity.is_file() and "class Unityplayer" in unity.read_text(encoding="utf-8", errors="replace"):
+        text = unity.read_text(encoding="utf-8", errors="replace")
+        marker = "    @apihook('UnitySetGraphicsDevice', argc=4)\n"
+        handler = """    @apihook('UnityMain2', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def UnityMain2(self, emu, argv, ctx={}):
+        return 0
+
+"""
+        text = _insert_once(text, "def UnityMain2(", marker, handler, unity)
+        unity.write_text(text, encoding="utf-8")
         return
 
     unity.write_text("""# Speakeasy overlay: minimal UnityPlayer.dll support.
@@ -33881,6 +35651,10 @@ class Unityplayer(api.ApiHandler):
     @apihook('UnityMainImpl', argc=4)
     def UnityMainImpl(self, emu, argv, ctx={}):
         return self.UnityMain(emu, argv, ctx)
+
+    @apihook('UnityMain2', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def UnityMain2(self, emu, argv, ctx={}):
+        return 0
 
     @apihook('UnitySetGraphicsDevice', argc=4)
     def UnitySetGraphicsDevice(self, emu, argv, ctx={}):
@@ -36420,6 +38194,41 @@ def patch_qt6core_qvariant_helpers() -> None:
     qt6core.write_text(text, encoding="utf-8")
 
 
+def patch_qt6core_qmetasequence_helpers() -> None:
+    qt6core = _speakeasy_root() / "winenv" / "api" / "usermode" / "qt6core.py"
+    if not qt6core.is_file():
+        return
+    text = qt6core.read_text(encoding="utf-8")
+    marker = "    @apihook('?qgetenv@@YA?AVQByteArray@@PEBD@Z', argc=1)\n"
+    handler = """    def _qmeta_sequence_init(self, emu, obj):
+        obj = obj or self._handle()
+        try:
+            self.mem_write(obj, b'\\x00' * 0x40)
+        except Exception:
+            pass
+        return obj
+
+    @apihook('??0QMetaSequence@@QEAA@XZ', argc=1)
+    def QMetaSequence_ctor_default_x64(self, emu, argv, ctx={}):
+        return self._qmeta_sequence_init(emu, self._this_or_handle(argv))
+
+    @apihook('??0QMetaSequence@@QAE@XZ', argc=1)
+    def QMetaSequence_ctor_default_x86(self, emu, argv, ctx={}):
+        return self._qmeta_sequence_init(emu, self._this_or_handle(argv))
+
+    @apihook('??1QMetaSequence@@QEAA@XZ', argc=1)
+    def QMetaSequence_dtor_x64(self, emu, argv, ctx={}):
+        return None
+
+    @apihook('??1QMetaSequence@@QAE@XZ', argc=1)
+    def QMetaSequence_dtor_x86(self, emu, argv, ctx={}):
+        return None
+
+"""
+    text = _insert_once(text, "def QMetaSequence_ctor_default_x64(", marker, handler, qt6core)
+    qt6core.write_text(text, encoding="utf-8")
+
+
 def patch_qt6core_application_instance_x64() -> None:
     qt6core = _speakeasy_root() / "winenv" / "api" / "usermode" / "qt6core.py"
     if not qt6core.is_file():
@@ -36977,6 +38786,16 @@ def patch_qt5widgets_mainwindow_helpers() -> None:
 def patch_mfc42_module() -> None:
     mfc42 = _speakeasy_root() / "winenv" / "api" / "usermode" / "mfc42.py"
     if mfc42.is_file() and "class Mfc42" in mfc42.read_text(encoding="utf-8"):
+        text = mfc42.read_text(encoding="utf-8")
+        marker = "    @apihook('ordinal_2818', argc=3, ordinal=2818)\n"
+        handler = """    @apihook('ordinal_1644', argc=e_arch.VAR_ARGS, ordinal=1644)
+    def ordinal_1644(self, emu, argv, ctx={}):
+        self.exit_process()
+        return self._state(emu)
+
+"""
+        text = _insert_once(text, "def ordinal_1644(", marker, handler, mfc42)
+        mfc42.write_text(text, encoding="utf-8")
         return
 
     mfc42.write_text("""# Speakeasy overlay: minimal MFC42 support.
@@ -37052,6 +38871,11 @@ class Mfc42(api.ApiHandler):
         # real DLL drives CWinApp::InitInstance/message-loop internally; our
         # overlay cannot enter that framework code, so stop cleanly instead of
         # returning into import thunks that often use far-return glue.
+        self.exit_process()
+        return self._state(emu)
+
+    @apihook('ordinal_1644', argc=e_arch.VAR_ARGS, ordinal=1644)
+    def ordinal_1644(self, emu, argv, ctx={}):
         self.exit_process()
         return self._state(emu)
 
@@ -38434,6 +40258,24 @@ def patch_msvcp140_condition_helpers() -> None:
     msvcp140.write_text(text, encoding="utf-8")
 
 
+def patch_msvcp140_random_device() -> None:
+    msvcp140 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp140.py"
+    if not msvcp140.is_file():
+        return
+    text = msvcp140.read_text(encoding="utf-8")
+    marker = "    @apihook('_Xtime_get_ticks', argc=0, conv=e_arch.CALL_CONV_CDECL)\n"
+    handler = """    @apihook('?_Random_device@std@@YAIXZ', argc=0, conv=e_arch.CALL_CONV_CDECL)
+    def random_device(self, emu, argv, ctx={}):
+        state = getattr(self, '_vibe_random_device_state', 0x12345678)
+        state = ((state * 1103515245) + 12345) & 0xFFFFFFFF
+        self._vibe_random_device_state = state
+        return state
+
+"""
+    text = _insert_once(text, "def random_device(", marker, handler, msvcp140)
+    msvcp140.write_text(text, encoding="utf-8")
+
+
 def patch_msvcp140_thread_helpers() -> None:
     msvcp140 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp140.py"
     if not msvcp140.is_file():
@@ -38593,6 +40435,132 @@ def patch_msvcp140_codecvt_overloads() -> None:
     msvcp140.write_text(text, encoding="utf-8")
 
 
+def patch_msvcp140_codecvt_out_overload() -> None:
+    msvcp140 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp140.py"
+    if not msvcp140.is_file():
+        return
+    text = msvcp140.read_text(encoding="utf-8")
+    marker = "    @apihook('_Xtime_get_ticks', argc=0, conv=e_arch.CALL_CONV_CDECL)\n"
+    handler = """    def _codecvt_wchar_out(self, emu, from_ptr, from_end, from_next_ptr, to_ptr, to_end, to_next_ptr):
+        ptr_size = emu.get_ptr_size()
+        if from_next_ptr:
+            try:
+                self.mem_write(from_next_ptr, int(from_ptr or 0).to_bytes(ptr_size, 'little'))
+            except Exception:
+                pass
+        if to_next_ptr:
+            try:
+                self.mem_write(to_next_ptr, int(to_ptr or 0).to_bytes(ptr_size, 'little'))
+            except Exception:
+                pass
+        if not from_ptr or not to_ptr:
+            return 0
+        wchar_count = 0
+        if from_end and from_end > from_ptr:
+            wchar_count = min((int(from_end) - int(from_ptr)) // 2, 0x4000)
+        capacity = 0
+        if to_end and to_end > to_ptr:
+            capacity = min(int(to_end) - int(to_ptr), 0x4000)
+        if not wchar_count or not capacity:
+            return 0
+        try:
+            raw = self.mem_read(from_ptr, wchar_count * 2)
+            text = raw.decode('utf-16le', errors='replace')
+            out = text.encode('ascii', errors='replace')[:capacity]
+            if out:
+                self.mem_write(to_ptr, out)
+            consumed = min(len(out), wchar_count)
+            if from_next_ptr:
+                self.mem_write(from_next_ptr, int(from_ptr + consumed * 2).to_bytes(ptr_size, 'little'))
+            if to_next_ptr:
+                self.mem_write(to_next_ptr, int(to_ptr + len(out)).to_bytes(ptr_size, 'little'))
+            return 0 if consumed >= wchar_count else 1
+        except Exception:
+            return 0
+
+    @apihook('?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z', argc=8)
+    def codecvt_wchar_out_x64(self, emu, argv, ctx={}):
+        this, state, from_ptr, from_end, from_next_ptr, to_ptr, to_end, to_next_ptr = argv
+        return self._codecvt_wchar_out(emu, from_ptr, from_end, from_next_ptr, to_ptr, to_end, to_next_ptr)
+
+"""
+    text = _insert_once(text, "def codecvt_wchar_out_x64(", marker, handler, msvcp140)
+    msvcp140.write_text(text, encoding="utf-8")
+
+
+def patch_msvcp140_codecvt_in_overload() -> None:
+    msvcp140 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp140.py"
+    if not msvcp140.is_file():
+        return
+    text = msvcp140.read_text(encoding="utf-8")
+    marker = "    @apihook('_Xtime_get_ticks', argc=0, conv=e_arch.CALL_CONV_CDECL)\n"
+    handler = """    def _codecvt_wchar_in(self, emu, from_ptr, from_end, from_next_ptr, to_ptr, to_end, to_next_ptr):
+        ptr_size = emu.get_ptr_size()
+        if from_next_ptr:
+            try:
+                self.mem_write(from_next_ptr, int(from_ptr or 0).to_bytes(ptr_size, 'little'))
+            except Exception:
+                pass
+        if to_next_ptr:
+            try:
+                self.mem_write(to_next_ptr, int(to_ptr or 0).to_bytes(ptr_size, 'little'))
+            except Exception:
+                pass
+        if not from_ptr or not to_ptr:
+            return 0
+        byte_count = 0
+        if from_end and from_end > from_ptr:
+            byte_count = min(int(from_end) - int(from_ptr), 0x4000)
+        wchar_capacity = 0
+        if to_end and to_end > to_ptr:
+            wchar_capacity = min((int(to_end) - int(to_ptr)) // 2, 0x4000)
+        if not byte_count or not wchar_capacity:
+            return 0
+        try:
+            raw = self.mem_read(from_ptr, byte_count)
+            text = raw.decode('utf-8', errors='replace')[:wchar_capacity]
+            out = text.encode('utf-16le', errors='replace')
+            if out:
+                self.mem_write(to_ptr, out)
+            consumed = min(len(raw), len(text.encode('utf-8', errors='replace')))
+            if from_next_ptr:
+                self.mem_write(from_next_ptr, int(from_ptr + consumed).to_bytes(ptr_size, 'little'))
+            if to_next_ptr:
+                self.mem_write(to_next_ptr, int(to_ptr + len(out)).to_bytes(ptr_size, 'little'))
+            return 0 if consumed >= byte_count else 1
+        except Exception:
+            return 0
+
+    @apihook('?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z', argc=8)
+    def codecvt_wchar_in_x64(self, emu, argv, ctx={}):
+        this, state, from_ptr, from_end, from_next_ptr, to_ptr, to_end, to_next_ptr = argv
+        return self._codecvt_wchar_in(emu, from_ptr, from_end, from_next_ptr, to_ptr, to_end, to_next_ptr)
+
+"""
+    text = _insert_once(text, "def codecvt_wchar_in_x64(", marker, handler, msvcp140)
+    msvcp140.write_text(text, encoding="utf-8")
+
+
+def patch_msvcp140_ostream_manipulator_overloads() -> None:
+    msvcp140 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp140.py"
+    if not msvcp140.is_file():
+        return
+    text = msvcp140.read_text(encoding="utf-8")
+    marker = "    @apihook('_Xtime_get_ticks', argc=0, conv=e_arch.CALL_CONV_CDECL)\n"
+    handler = """    @apihook('??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z', argc=2)
+    def ostream_insert_manipulator_x64(self, emu, argv, ctx={}):
+        stream, manipulator = argv
+        return stream
+
+    @apihook('??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QAEAAV01@P6AAAV01@AAV01@@Z@Z', argc=1)
+    def ostream_insert_manipulator_x86(self, emu, argv, ctx={}):
+        return self._this_ecx(emu)
+
+"""
+    text = _insert_once(text, "def ostream_insert_manipulator_x64(", marker, handler, msvcp140)
+    msvcp140.write_text(text, encoding="utf-8")
+
+
 def patch_msvcp100_module() -> None:
     msvcp100 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp100.py"
     if msvcp100.is_file() and "class Msvcp100" in msvcp100.read_text(encoding="utf-8"):
@@ -38696,6 +40664,63 @@ class Msvcp100(api.ApiHandler):
     def fiopen_wide_x86(self, emu, argv, ctx={}):
         return self._iobuf()
 """, encoding="utf-8")
+
+
+def patch_msvcp100_locale_locimp_helpers() -> None:
+    msvcp100 = _speakeasy_root() / "winenv" / "api" / "usermode" / "msvcp100.py"
+    if not msvcp100.is_file():
+        return
+    text = msvcp100.read_text(encoding="utf-8")
+    marker = "    @apihook('??0?$basic_ios@DU?$char_traits@D@std@@@std@@IAE@XZ', argc=0)\n"
+    handler = """    def _vibe_msvcp100_locimp(self, emu):
+        ptr = getattr(self, '_vibe_msvcp100_locimp_ptr', 0)
+        if not ptr:
+            ptr = self.mem_alloc(0x80, tag='api.msvcp100.locale.locimp')
+            try:
+                self.mem_write(ptr, b'\\x00' * 0x80)
+            except Exception:
+                pass
+            self._vibe_msvcp100_locimp_ptr = ptr
+        return ptr
+
+    @apihook('?_Init@locale@std@@CAPAV_Locimp@12@XZ', argc=0)
+    def locale_init_locimp_x86(self, emu, argv, ctx={}):
+        return self._vibe_msvcp100_locimp(emu)
+
+    @apihook('?_Getgloballocale@locale@std@@CAPAV_Locimp@12@XZ', argc=0)
+    def locale_get_global_x86(self, emu, argv, ctx={}):
+        return self._vibe_msvcp100_locimp(emu)
+
+    @apihook('?_Makeloc@_Locimp@locale@std@@CAPAV123@ABV_Locinfo@3@HPAV123@PBV23@@Z', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def locale_make_loc_from_locinfo_x86(self, emu, argv, ctx={}):
+        return self._vibe_msvcp100_locimp(emu)
+
+    @apihook('??0_Locimp@locale@std@@AAE@_N@Z', argc=1)
+    def locimp_ctor_bool_x86(self, emu, argv, ctx={}):
+        locimp = self._this_ecx(emu) or self._vibe_msvcp100_locimp(emu)
+        return self._zero_object(emu, locimp, size=0x80)
+
+    @apihook('??1_Locimp@locale@std@@AAE@XZ', argc=0)
+    def locimp_dtor_x86(self, emu, argv, ctx={}):
+        return None
+
+    @apihook('??0_Locinfo@std@@QAE@HPBD@Z', argc=2)
+    def locinfo_ctor_category_name_x86(self, emu, argv, ctx={}):
+        category, name = argv
+        if name:
+            try:
+                argv[1] = self.read_mem_string(name, 1)
+            except Exception:
+                pass
+        return self._zero_object(emu, self._this_ecx(emu), size=0x80)
+
+    @apihook('??1_Locinfo@std@@QAE@XZ', argc=0)
+    def locinfo_dtor_x86(self, emu, argv, ctx={}):
+        return None
+
+"""
+    text = _insert_once(text, "def _vibe_msvcp100_locimp(", marker, handler, msvcp100)
+    msvcp100.write_text(text, encoding="utf-8")
 
 
 def patch_msvcp60_module() -> None:
@@ -40253,6 +42278,16 @@ def patch_base_module() -> None:
         init.write_text(init_text, encoding="utf-8")
 
     if base.is_file() and "class Base" in base.read_text(encoding="utf-8", errors="replace"):
+        text = base.read_text(encoding="utf-8", errors="replace")
+        marker = "    @apihook('?Run@Application@base@@QAEHXZ', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)\n"
+        handler = """    @apihook('?ShouldCreateLogMessage@logging@@YA_NH@Z', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def logging_should_create_log_message(self, emu, argv, ctx={}):
+        severity, = argv
+        return 0
+
+"""
+        text = _insert_once(text, "def logging_should_create_log_message(", marker, handler, base)
+        base.write_text(text, encoding="utf-8")
         return
 
     base.write_text("""# Speakeasy overlay: minimal base.dll application framework support.
@@ -40304,6 +42339,11 @@ class Base(api.ApiHandler):
     @apihook('?Exit@Application@base@@QAEXH@Z', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
     def application_exit(self, emu, argv, ctx={}):
         return None
+
+    @apihook('?ShouldCreateLogMessage@logging@@YA_NH@Z', argc=1, conv=e_arch.CALL_CONV_CDECL)
+    def logging_should_create_log_message(self, emu, argv, ctx={}):
+        severity, = argv
+        return 0
 
     @apihook('?Run@Application@base@@QAEHXZ', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
     def application_run(self, emu, argv, ctx={}):
@@ -40372,6 +42412,74 @@ class Libcurlpp(api.ApiHandler):
     @apihook('_ZN6curlpp4EasyD2Ev', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
     def Easy_D2(self, emu, argv, ctx={}):
         return self._this_or_zero(emu, argv)
+""", encoding="utf-8")
+
+
+def patch_libfilezilla58_module() -> None:
+    libfz = _speakeasy_root() / "winenv" / "api" / "usermode" / "libfilezilla_58.py"
+    if libfz.is_file() and "class Libfilezilla58" in libfz.read_text(encoding="utf-8", errors="replace"):
+        return
+
+    libfz.write_text("""# Speakeasy overlay: minimal libfilezilla-58.dll support.
+import speakeasy.winenv.arch as e_arch
+
+from .. import api
+
+
+class Libfilezilla58(api.ApiHandler):
+    name = 'libfilezilla-58'
+    apihook = api.ApiHandler.apihook
+    impdata = api.ApiHandler.impdata
+
+    def __init__(self, emu):
+        super(Libfilezilla58, self).__init__(emu)
+        self.funcs = {}
+        self.data = {}
+        super(Libfilezilla58, self).__get_hook_attrs__(self)
+
+    def _this_or_zero(self, emu, argv):
+        if argv:
+            return argv[0]
+        try:
+            return emu.get_reg('ecx')
+        except Exception:
+            return 0
+
+    def _zero_mutex(self, obj):
+        if obj:
+            try:
+                self.mem_write(obj, b'\\x00' * 0x20)
+            except Exception:
+                pass
+        return obj
+
+    @apihook('_ZN2fz5mutexC1Eb', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_C1_bool(self, emu, argv, ctx={}):
+        return self._zero_mutex(self._this_or_zero(emu, argv))
+
+    @apihook('_ZN2fz5mutexC2Eb', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_C2_bool(self, emu, argv, ctx={}):
+        return self.mutex_C1_bool(emu, argv, ctx)
+
+    @apihook('_ZN2fz5mutexD1Ev', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_D1(self, emu, argv, ctx={}):
+        return self._this_or_zero(emu, argv)
+
+    @apihook('_ZN2fz5mutexD2Ev', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_D2(self, emu, argv, ctx={}):
+        return self._this_or_zero(emu, argv)
+
+    @apihook('_ZN2fz5mutex4lockEv', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_lock(self, emu, argv, ctx={}):
+        return 0
+
+    @apihook('_ZN2fz5mutex6unlockEv', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_unlock(self, emu, argv, ctx={}):
+        return 0
+
+    @apihook('_ZN2fz5mutex8try_lockEv', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def mutex_try_lock(self, emu, argv, ctx={}):
+        return 1
 """, encoding="utf-8")
 
 
@@ -42330,7 +44438,7 @@ class ApiMsWinCrtPrivate(api.ApiHandler):
 
 def patch_api_ms_win_crt_convert_module() -> None:
     crt_convert = _speakeasy_root() / "winenv" / "api" / "usermode" / "api_ms_win_crt_convert_l1_1_0.py"
-    if crt_convert.is_file() and "class ApiMsWinCrtConvert" in crt_convert.read_text(encoding="utf-8"):
+    if crt_convert.is_file() and "def mbrtowc(" in crt_convert.read_text(encoding="utf-8"):
         return
 
     crt_convert.write_text("""# Speakeasy overlay: api-ms-win-crt-convert-l1-1-0.dll support.
@@ -42402,6 +44510,48 @@ class ApiMsWinCrtConvert(api.ApiHandler):
         c, = argv
         c &= 0xFFFFFFFF
         return c & 0xFF if c != 0xFFFFFFFF else 0xFFFF
+
+    def _decode_one_mb_char(self, data):
+        if not data:
+            return '', 0
+        if data[0] == 0:
+            return '\\x00', 0
+        for size in range(1, min(len(data), 4) + 1):
+            try:
+                return data[:size].decode('utf-8'), size
+            except UnicodeDecodeError:
+                pass
+        try:
+            return data[:1].decode('cp1252', errors='replace'), 1
+        except Exception:
+            return '?', 1
+
+    @apihook('mbrtowc', argc=4, conv=e_arch.CALL_CONV_CDECL)
+    def mbrtowc(self, emu, argv, ctx={}):
+        pwc, s, n, ps = argv
+        if not s:
+            return 0
+        n &= 0xFFFFFFFFFFFFFFFF
+        if n == 0:
+            return 0xFFFFFFFFFFFFFFFE
+        try:
+            data = self.mem_read(s, min(n, 4))
+        except Exception:
+            return 0xFFFFFFFFFFFFFFFF
+        ch, used = self._decode_one_mb_char(data)
+        if ch == '\\x00':
+            if pwc:
+                try:
+                    self.mem_write(pwc, b'\\x00\\x00')
+                except Exception:
+                    pass
+            return 0
+        if pwc:
+            try:
+                self.mem_write(pwc, ch[:1].encode('utf-16le', errors='replace'))
+            except Exception:
+                pass
+        return used or 1
 
     @apihook('atoi', argc=1, conv=e_arch.CALL_CONV_CDECL)
     def atoi(self, emu, argv, ctx={}):
@@ -44347,6 +46497,38 @@ class ApiMsWinCrtFilesystem(api.ApiHandler):
 def patch_api_ms_win_crt_locale_module() -> None:
     crt_locale = _speakeasy_root() / "winenv" / "api" / "usermode" / "api_ms_win_crt_locale_l1_1_0.py"
     if crt_locale.is_file() and "class ApiMsWinCrtLocale" in crt_locale.read_text(encoding="utf-8"):
+        text = crt_locale.read_text(encoding="utf-8")
+        marker = "    @apihook('localeconv', argc=0, conv=e_arch.CALL_CONV_CDECL)\n"
+        handler = """    def _ctype_table_ptr(self):
+        if not getattr(self, '_vibe_ctype_table', 0):
+            table = bytearray(0x202 * 2)
+            for c in range(256):
+                flags = 0
+                if 48 <= c <= 57:
+                    flags |= 0x0004
+                if 65 <= c <= 90:
+                    flags |= 0x0101
+                if 97 <= c <= 122:
+                    flags |= 0x0202
+                if c in (9, 10, 11, 12, 13, 32):
+                    flags |= 0x0008
+                off = (c + 1) * 2
+                table[off:off + 2] = flags.to_bytes(2, 'little')
+            self._vibe_ctype_table = self.mem_alloc(len(table), tag='api.ucrt.locale.ctype')
+            self.mem_write(self._vibe_ctype_table, bytes(table))
+        return self._vibe_ctype_table + 2
+
+    @apihook('__pctype_func', argc=0, conv=e_arch.CALL_CONV_CDECL)
+    def __pctype_func(self, emu, argv, ctx={}):
+        return self._ctype_table_ptr()
+
+    @apihook('__pwctype_func', argc=0, conv=e_arch.CALL_CONV_CDECL)
+    def __pwctype_func(self, emu, argv, ctx={}):
+        return self._ctype_table_ptr()
+
+"""
+        text = _insert_once(text, "def __pctype_func(", marker, handler, crt_locale)
+        crt_locale.write_text(text, encoding="utf-8")
         return
 
     crt_locale.write_text("""# Speakeasy overlay: api-ms-win-crt-locale-l1-1-0.dll support.
@@ -44397,6 +46579,33 @@ class ApiMsWinCrtLocale(api.ApiHandler):
     @apihook('_free_locale', argc=1, conv=e_arch.CALL_CONV_CDECL)
     def _free_locale(self, emu, argv, ctx={}):
         return None
+
+    def _ctype_table_ptr(self):
+        if not getattr(self, '_vibe_ctype_table', 0):
+            table = bytearray(0x202 * 2)
+            for c in range(256):
+                flags = 0
+                if 48 <= c <= 57:
+                    flags |= 0x0004
+                if 65 <= c <= 90:
+                    flags |= 0x0101
+                if 97 <= c <= 122:
+                    flags |= 0x0202
+                if c in (9, 10, 11, 12, 13, 32):
+                    flags |= 0x0008
+                off = (c + 1) * 2
+                table[off:off + 2] = flags.to_bytes(2, 'little')
+            self._vibe_ctype_table = self.mem_alloc(len(table), tag='api.ucrt.locale.ctype')
+            self.mem_write(self._vibe_ctype_table, bytes(table))
+        return self._vibe_ctype_table + 2
+
+    @apihook('__pctype_func', argc=0, conv=e_arch.CALL_CONV_CDECL)
+    def __pctype_func(self, emu, argv, ctx={}):
+        return self._ctype_table_ptr()
+
+    @apihook('__pwctype_func', argc=0, conv=e_arch.CALL_CONV_CDECL)
+    def __pwctype_func(self, emu, argv, ctx={}):
+        return self._ctype_table_ptr()
 
     @apihook('localeconv', argc=0, conv=e_arch.CALL_CONV_CDECL)
     def localeconv(self, emu, argv, ctx={}):
@@ -44770,6 +46979,137 @@ class Libcares2(api.ApiHandler):
     @apihook('ares_free_data', argc=1, conv=e_arch.CALL_CONV_CDECL)
     def ares_free_data(self, emu, argv, ctx={}):
         return None
+""", encoding="utf-8")
+
+
+def patch_libcxx_module() -> None:
+    libcxx = _speakeasy_root() / "winenv" / "api" / "usermode" / "libc__.py"
+    existing = libcxx.read_text(encoding="utf-8", errors="replace") if libcxx.is_file() else ""
+    if (
+        libcxx.is_file()
+        and "class Libcxx" in existing
+        and "def wide_basic_string_ctor_default(" in existing
+        and "def wide_basic_string_init(" in existing
+        and "def wide_basic_string_rfind_char(" in existing
+        and "def wide_basic_string_empty(" in existing
+        and "def wide_basic_string_insert_cstr(" in existing
+        and "def wide_basic_string_move_ctor(" in existing
+    ):
+        return
+
+    libcxx.write_text("""# Speakeasy overlay: minimal libc++.dll C++ runtime support.
+import speakeasy.winenv.arch as e_arch
+
+from .. import api
+
+
+class Libcxx(api.ApiHandler):
+    name = 'libc++'
+    apihook = api.ApiHandler.apihook
+    impdata = api.ApiHandler.impdata
+
+    def __init__(self, emu):
+        super(Libcxx, self).__init__(emu)
+        self.funcs = {}
+        self.data = {}
+        super(Libcxx, self).__get_hook_attrs__(self)
+
+    def _empty_wide(self):
+        if not getattr(self, '_vibe_empty_wide', 0):
+            self._vibe_empty_wide = self.mem_alloc(2, tag='api.libcxx.empty_wide')
+            self.mem_write(self._vibe_empty_wide, b'\\x00\\x00')
+        return self._vibe_empty_wide
+
+    def _init_wide_string(self, emu, this, src=0):
+        if not this:
+            return 0
+        text = ''
+        if src:
+            try:
+                text = self.read_mem_string(src, 2)
+            except Exception:
+                text = ''
+        raw = text.encode('utf-16le', errors='ignore') + b'\\x00\\x00'
+        buf = self.mem_alloc(max(2, len(raw)), tag='api.libcxx.wstring')
+        self.mem_write(buf, raw)
+        ptr_size = emu.get_ptr_size()
+        size = len(text)
+        try:
+            self.mem_write(this, buf.to_bytes(ptr_size, 'little'))
+            self.mem_write(this + ptr_size, size.to_bytes(ptr_size, 'little'))
+            self.mem_write(this + (ptr_size * 2), max(15, size).to_bytes(ptr_size, 'little'))
+        except Exception:
+            try:
+                self.mem_write(this, b'\\x00' * 0x20)
+            except Exception:
+                pass
+        return this
+
+    @apihook('??0?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEAA@XZ', argc=1)
+    def wide_basic_string_ctor_default(self, emu, argv, ctx={}):
+        this, = argv
+        return self._init_wide_string(emu, this)
+
+    @apihook('??0?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEAA@PEB_W@Z', argc=2)
+    def wide_basic_string_ctor_cstr(self, emu, argv, ctx={}):
+        this, src = argv
+        return self._init_wide_string(emu, this, src)
+
+    @apihook('??0?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEAA@$$QEAV012@@Z', argc=2)
+    def wide_basic_string_move_ctor(self, emu, argv, ctx={}):
+        this, other = argv
+        return self._init_wide_string(emu, this)
+
+    @apihook('?__init@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@AEAAXPEB_W_K@Z', argc=3)
+    def wide_basic_string_init(self, emu, argv, ctx={}):
+        this, src, count = argv
+        return self._init_wide_string(emu, this, src)
+
+    @apihook('??1?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEAA@XZ', argc=1)
+    def wide_basic_string_dtor(self, emu, argv, ctx={}):
+        return None
+
+    @apihook('?c_str@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEBAPEB_WXZ', argc=1)
+    def wide_basic_string_c_str(self, emu, argv, ctx={}):
+        this, = argv
+        if this:
+            try:
+                ptr = int.from_bytes(self.mem_read(this, emu.get_ptr_size()), 'little')
+                if ptr:
+                    return ptr
+            except Exception:
+                pass
+        return self._empty_wide()
+
+    @apihook('?data@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEBAPEB_WXZ', argc=1)
+    def wide_basic_string_data(self, emu, argv, ctx={}):
+        return self.wide_basic_string_c_str(emu, argv, ctx)
+
+    @apihook('?size@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEBA_KXZ', argc=1)
+    def wide_basic_string_size(self, emu, argv, ctx={}):
+        this, = argv
+        try:
+            return int.from_bytes(self.mem_read(this + emu.get_ptr_size(), emu.get_ptr_size()), 'little')
+        except Exception:
+            return 0
+
+    @apihook('?length@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEBA_KXZ', argc=1)
+    def wide_basic_string_length(self, emu, argv, ctx={}):
+        return self.wide_basic_string_size(emu, argv, ctx)
+
+    @apihook('?empty@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEBA_NXZ', argc=1)
+    def wide_basic_string_empty(self, emu, argv, ctx={}):
+        return 1 if self.wide_basic_string_size(emu, argv, ctx) == 0 else 0
+
+    @apihook('?rfind@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEBA_K_W_K@Z', argc=3)
+    def wide_basic_string_rfind_char(self, emu, argv, ctx={}):
+        this, ch, pos = argv
+        return (1 << (emu.get_ptr_size() * 8)) - 1
+
+    @apihook('?insert@?$basic_string@_WU?$char_traits@_W@__1@std@@V?$allocator@_W@23@@__1@std@@QEAAAEAV123@_KPEB_W@Z', argc=3)
+    def wide_basic_string_insert_cstr(self, emu, argv, ctx={}):
+        this, pos, src = argv
+        return this
 """, encoding="utf-8")
 
 
@@ -49196,6 +51536,48 @@ class Userenv(api.ApiHandler):
     def ExpandEnvironmentStringsForUserW(self, emu, argv, ctx={}):
         return self._expand_env_for_user(emu, argv, 2)
 
+    def _environment_block(self):
+        entries = [
+            'ALLUSERSPROFILE=C:\\\\ProgramData',
+            'APPDATA=' + self._profile_dir() + '\\\\AppData\\\\Roaming',
+            'COMPUTERNAME=DESKTOP-SPEAKEASY',
+            'LOCALAPPDATA=' + self._profile_dir() + '\\\\AppData\\\\Local',
+            'ProgramData=C:\\\\ProgramData',
+            'ProgramFiles=C:\\\\Program Files',
+            'SystemDrive=C:',
+            'SystemRoot=C:\\\\Windows',
+            'TEMP=' + self._profile_dir() + '\\\\AppData\\\\Local\\\\Temp',
+            'TMP=' + self._profile_dir() + '\\\\AppData\\\\Local\\\\Temp',
+            'USERDOMAIN=DESKTOP-SPEAKEASY',
+            'USERNAME=john',
+            'USERPROFILE=' + self._profile_dir(),
+            'windir=C:\\\\Windows',
+        ]
+        return ('\\x00'.join(entries) + '\\x00\\x00').encode('utf-16le')
+
+    @apihook('CreateEnvironmentBlock', argc=3)
+    def CreateEnvironmentBlock(self, emu, argv, ctx={}):
+        lpEnvironment, hToken, bInherit = argv
+        if not lpEnvironment:
+            emu.set_last_error(ERROR_INSUFFICIENT_BUFFER)
+            return 0
+        raw = self._environment_block()
+        try:
+            block = self.mem_alloc(len(raw), tag='api.userenv.environment_block')
+            self.mem_write(block, raw)
+            self.mem_write(lpEnvironment, block.to_bytes(emu.get_ptr_size(), 'little'))
+            argv[0] = block
+        except Exception:
+            emu.set_last_error(ERROR_INSUFFICIENT_BUFFER)
+            return 0
+        emu.set_last_error(ERROR_SUCCESS)
+        return 1
+
+    @apihook('DestroyEnvironmentBlock', argc=1)
+    def DestroyEnvironmentBlock(self, emu, argv, ctx={}):
+        emu.set_last_error(ERROR_SUCCESS)
+        return 1
+
     @apihook('LoadUserProfile', argc=2)
     def LoadUserProfile(self, emu, argv, ctx={}):
         return 1
@@ -49295,6 +51677,14 @@ def patch_nw_elf_module() -> None:
     nw_elf = _speakeasy_root() / "winenv" / "api" / "usermode" / "nw_elf.py"
     text = nw_elf.read_text(encoding="utf-8", errors="replace") if nw_elf.is_file() else ""
     if nw_elf.is_file() and "class NwElf" in text and "GetInstallDetailsPayload" in text:
+        marker = "    @apihook('GetInstallDetailsPayload', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)\n"
+        handler = """    @apihook('IsBrowserProcess', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def IsBrowserProcess(self, emu, argv, ctx={}):
+        return 1
+
+"""
+        text = _insert_once(text, "def IsBrowserProcess(", marker, handler, nw_elf)
+        nw_elf.write_text(text, encoding="utf-8")
         return
 
     nw_elf.write_text("""# Speakeasy overlay: minimal nw_elf.dll installer-details facade.
@@ -49325,6 +51715,10 @@ class NwElf(api.ApiHandler):
                 pass
         return self._payload
 
+    @apihook('IsBrowserProcess', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def IsBrowserProcess(self, emu, argv, ctx={}):
+        return 1
+
     @apihook('GetInstallDetailsPayload', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
     def GetInstallDetailsPayload(self, emu, argv, ctx={}):
         payload = self._payload_ptr()
@@ -49349,7 +51743,79 @@ class NwElf(api.ApiHandler):
 """, encoding="utf-8")
 
 
+def patch_inode_utility_module() -> None:
+    inode_utility = _speakeasy_root() / "winenv" / "api" / "usermode" / "inode_utility.py"
+    if inode_utility.is_file() and "class InodeUtility" in inode_utility.read_text(encoding="utf-8", errors="replace"):
+        text = inode_utility.read_text(encoding="utf-8", errors="replace")
+        marker = "    @apihook('?utl_InitLangEnv@@YAHABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@_N@Z', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)\n"
+        handler = """    @apihook('utl_InitVerifyAndLoad', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def utl_InitVerifyAndLoad(self, emu, argv, ctx={}):
+        return 0
+
+"""
+        text = _insert_once(text, "def utl_InitVerifyAndLoad(", marker, handler, inode_utility)
+        inode_utility.write_text(text, encoding="utf-8")
+        return
+
+    inode_utility.write_text("""# Speakeasy overlay: minimal inode_utility.dll support.
+import speakeasy.winenv.arch as e_arch
+
+from .. import api
+
+
+class InodeUtility(api.ApiHandler):
+    name = 'inode_utility'
+    apihook = api.ApiHandler.apihook
+    impdata = api.ApiHandler.impdata
+
+    def __init__(self, emu):
+        super(InodeUtility, self).__init__(emu)
+        self.funcs = {}
+        self.data = {}
+        super(InodeUtility, self).__get_hook_attrs__(self)
+
+    @apihook('?utl_InitLangEnv@@YAHABV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@_N@Z', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def utl_InitLangEnv(self, emu, argv, ctx={}):
+        return 0
+
+    @apihook('utl_InitVerifyAndLoad', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def utl_InitVerifyAndLoad(self, emu, argv, ctx={}):
+        return 0
+""", encoding="utf-8")
+
+
+def patch_inodelog_module() -> None:
+    inodelog = _speakeasy_root() / "winenv" / "api" / "usermode" / "inodelog.py"
+    if inodelog.is_file() and "class Inodelog" in inodelog.read_text(encoding="utf-8", errors="replace"):
+        return
+
+    inodelog.write_text("""# Speakeasy overlay: minimal inodelog.dll support.
+import speakeasy.winenv.arch as e_arch
+
+from .. import api
+
+
+class Inodelog(api.ApiHandler):
+    name = 'inodelog'
+    apihook = api.ApiHandler.apihook
+    impdata = api.ApiHandler.impdata
+
+    def __init__(self, emu):
+        super(Inodelog, self).__init__(emu)
+        self.funcs = {}
+        self.data = {}
+        super(Inodelog, self).__get_hook_attrs__(self)
+
+    @apihook('?log@inode@@YAXPBDW4ENUM_LOG_TYPE@@0K@Z', argc=e_arch.VAR_ARGS, conv=e_arch.CALL_CONV_CDECL)
+    def inode_log(self, emu, argv, ctx={}):
+        return None
+""", encoding="utf-8")
+
+
 def main() -> None:
+    patch_winemu_api_return_guard()
+    patch_speakeasy_file_archive_empty_name_guard()
+    patch_cli_all_entrypoints_env()
     patch_fls_get_value2()
     patch_get_temp_path2()
     patch_get_temp_path_guard()
@@ -49377,6 +51843,7 @@ def main() -> None:
     patch_advapi_enum_services_status_ex()
     patch_advapi_service_lock_helpers()
     patch_advapi_service_ctrl_handler_ex()
+    patch_advapi_token_information_realism()
     patch_advapi_duplicate_token()
     patch_advapi_convert_sid_to_string_sid()
     patch_advapi_acl_helpers()
@@ -49384,6 +51851,8 @@ def main() -> None:
     patch_advapi_lookup_privilege_value_guard()
     patch_advapi_current_hw_profile()
     patch_advapi_crypto_key_lifecycle()
+    patch_advapi_crypt_release_context_guard()
+    patch_kernel32_crypto_forwarders()
     patch_advapi_event_and_sddl()
     patch_advapi_create_process_as_user_guard()
     patch_kernel32_get_system_windows_directory()
@@ -49406,11 +51875,14 @@ def main() -> None:
     patch_kernel32_startupinfo_aliases()
     patch_kernel32_process_image_path_realism()
     patch_kernel32_module_handle_aliases()
+    patch_kernel32_get_module_filename_ex_guard()
     patch_kernel32_string_aliases()
     patch_kernel32_stack_capture()
     patch_kernel32_create_process_guard()
     patch_kernel32_proc_thread_attribute_and_io_completion()
     patch_kernel32_process_memory_guard()
+    patch_kernel32_virtualalloc_fallback()
+    patch_kernel32_fastfail_feature_guard()
     patch_kernel32_virtual_lock_helpers()
     patch_kernel32_get_proc_address_guard()
     patch_kernel32_crash_handler_helpers()
@@ -49421,6 +51893,7 @@ def main() -> None:
     patch_kernel32_fiber_helpers()
     patch_kernel32_set_file_pointer_ex()
     patch_kernel32_file_api_mode()
+    patch_kernel32_createfile_open_guard()
     patch_kernel32_file_lock_helpers()
     patch_kernel32_copy_file_ex()
     patch_kernel32_copy_file_guard()
@@ -49457,6 +51930,7 @@ def main() -> None:
     patch_ntdll_heap_functions()
     patch_ntdll_critical_section_helpers()
     patch_ntdll_delay_execution()
+    patch_ntdll_timer_resolution_helpers()
     patch_ntdll_time_conversion_helpers()
     patch_ntdll_power_information()
     patch_ntdll_rtl_image_nt_header()
@@ -49492,6 +51966,7 @@ def main() -> None:
     patch_ntoskrnl_rtl_decompress_buffer_format_mask()
     patch_ntoskrnl_zw_open_key_guard()
     patch_ntoskrnl_zw_query_system_information_fallback()
+    patch_ntoskrnl_wide_crt_helpers()
     patch_rtl_pc_to_file_header()
     patch_kernel32_affinity_and_search_path()
     patch_kernel32_long_path_helpers()
@@ -49515,6 +51990,7 @@ def main() -> None:
     patch_ws2_event_helpers()
     patch_ws2_wsa_recv_send_helpers()
     patch_ws2_hostname_aliases()
+    patch_ws2_getservbyname_ordinal_55()
     patch_dnsapi_a_record_queries()
     patch_ws2_getaddrinfo_offline_dns()
     patch_netman_offline_dns_defaults()
@@ -49541,6 +52017,7 @@ def main() -> None:
     patch_user32_clipboard_format()
     patch_user32_system_parameters_and_timeout_box()
     patch_user32_system_menu()
+    patch_user32_defer_window_pos_helpers()
     patch_user32_rect_boolean_helpers()
     patch_user32_menu_context_help()
     patch_user32_enum_display_monitors()
@@ -49599,6 +52076,7 @@ def main() -> None:
     patch_msvcrt_memset_guard()
     patch_msvcrt_memory_copy_guards()
     patch_msvcrt_string_compare_helpers()
+    patch_msvcrt_strchr_guards()
     patch_msvcrt_multibyte_string_helpers()
     patch_msvcrt_termination_helpers()
     patch_msvcrt_time_helpers()
@@ -49687,6 +52165,7 @@ def main() -> None:
     patch_qt6core_qstring_from_std_string()
     patch_qt6core_qbytearray_conversions()
     patch_qt6core_qvariant_helpers()
+    patch_qt6core_qmetasequence_helpers()
     patch_qt6core_application_instance_x64()
     patch_qt6core_application_version()
     patch_qt6gui_module()
@@ -49706,10 +52185,15 @@ def main() -> None:
     patch_msvcp140d_module()
     patch_msvcp140_mutex_helpers()
     patch_msvcp140_condition_helpers()
+    patch_msvcp140_random_device()
     patch_msvcp140_thread_helpers()
     patch_msvcp140_iostream_x86_helpers()
     patch_msvcp140_codecvt_overloads()
+    patch_msvcp140_codecvt_out_overload()
+    patch_msvcp140_codecvt_in_overload()
+    patch_msvcp140_ostream_manipulator_overloads()
     patch_msvcp100_module()
+    patch_msvcp100_locale_locimp_helpers()
     patch_msvcp60_module()
     patch_rpcrt4_server_helpers()
     patch_rpcrt4_string_binding_helpers()
@@ -49723,6 +52207,7 @@ def main() -> None:
     patch_ggml_base_module()
     patch_base_module()
     patch_libcurlpp_module()
+    patch_libfilezilla58_module()
     patch_libvlc_module()
     patch_libgtkmm_module()
     patch_libglibmm_module()
@@ -49754,6 +52239,7 @@ def main() -> None:
     patch_api_ms_win_crt_locale_module()
     patch_api_ms_win_crt_math_module()
     patch_libcares_module()
+    patch_libcxx_module()
     patch_libstdcxx6_module()
     patch_libsfml_system3_module()
     patch_libsfml_window3_module()
@@ -49787,6 +52273,8 @@ def main() -> None:
     patch_userenv_module()
     patch_normaliz_module()
     patch_nw_elf_module()
+    patch_inode_utility_module()
+    patch_inodelog_module()
 
 
 if __name__ == "__main__":

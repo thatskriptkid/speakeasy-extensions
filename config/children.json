@@ -837,6 +837,11 @@
         "path": "C:\\Windows\\system32\\bcrypt.dll"
       },
       {
+        "name": "bcryptprimitives",
+        "base_addr": "0x5f910000",
+        "path": "C:\\Windows\\system32\\bcryptprimitives.dll"
+      },
+      {
         "name": "ncrypt",
         "base_addr": "0x5fa00000",
         "path": "C:\\Windows\\system32\\ncrypt.dll"
@@ -855,6 +860,11 @@
         "name": "iphlpapi",
         "base_addr": "0x5fd00000",
         "path": "C:\\Windows\\system32\\iphlpapi.dll"
+      },
+      {
+        "name": "mpr",
+        "base_addr": "0x5fe00000",
+        "path": "C:\\Windows\\system32\\MPR.dll"
       }
     ]
   }

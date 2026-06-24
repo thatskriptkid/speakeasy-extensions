@@ -14,6 +14,9 @@ staging/
 tmp/
 modules/
 
+tools/speakeasy_batch_triage.py
+tools/speakeasy_goal_watchdog.py
+
 *.7z
 *.zip
 *.rar
