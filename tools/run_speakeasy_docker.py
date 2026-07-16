@@ -167,6 +167,15 @@ def _write_metadata(path: Path, meta: dict[str, Any]) -> None:
     path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _docker_cp_if_exists(docker: str, container_name: str, container_path: str, destination: Path) -> bool:
+    result = _run_quiet([docker, "cp", f"{container_name}:{container_path}", str(destination)])
+    return result.returncode == 0
+
+
+def _docker_rm(docker: str, container_name: str) -> None:
+    _run_quiet([docker, "rm", "-f", container_name])
+
+
 def _container_name(binary: Path) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_.-]+", "-", binary.stem).strip(".-").lower()
     safe = safe[:48] or "sample"
@@ -301,11 +310,10 @@ def run(args: argparse.Namespace) -> int:
         _build_image(docker, image, platform)
 
     input_root = binary.parent.resolve()
-    out_root = report_dir.resolve()
     target_in_container = _container_path(binary, input_root, "/input")
-    report_in_container = f"/out/{report_path.name}"
-    dropped_in_container = f"/out/{dropped_path.name}"
-    memdump_in_container = f"/out/{memdump_path.name}"
+    report_in_container = f"/tmp/{report_path.name}"
+    dropped_in_container = f"/tmp/{dropped_path.name}"
+    memdump_in_container = f"/tmp/{memdump_path.name}"
 
     speakeasy_cmd = [
         "speakeasy",
@@ -357,7 +365,7 @@ def run(args: argparse.Namespace) -> int:
         speakeasy_cmd += shlex.split(args.extra_speakeasy_args)
 
     container_name = _container_name(binary)
-    docker_cmd = [docker, "run", "--rm", "--name", container_name]
+    docker_cmd = [docker, "run", "--name", container_name]
     if platform:
         docker_cmd += ["--platform", platform]
     if network:
@@ -375,8 +383,6 @@ def run(args: argparse.Namespace) -> int:
         "ALL",
         "-v",
         f"{input_root}:/input:ro",
-        "-v",
-        f"{out_root}:/out:rw",
     ]
     if config_path:
         docker_cmd += ["-v", f"{config_path.parent}:/config:ro"]
@@ -437,7 +443,12 @@ def run(args: argparse.Namespace) -> int:
             timed_out = True
             exit_code = 124
             _run_quiet([docker, "kill", container_name])
-            _run_quiet([docker, "rm", "-f", container_name])
+
+    _docker_cp_if_exists(docker, container_name, report_in_container, report_path)
+    _docker_cp_if_exists(docker, container_name, dropped_in_container, dropped_path)
+    _docker_cp_if_exists(docker, container_name, memdump_in_container, memdump_path)
+    _docker_rm(docker, container_name)
+
     meta["exit_code"] = exit_code
     meta["timed_out"] = timed_out
     meta["wall_timeout_seconds"] = wall_timeout
