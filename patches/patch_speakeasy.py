@@ -80,6 +80,105 @@ def patch_speakeasy_file_archive_empty_name_guard() -> None:
     speakeasy_py.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
+def patch_kernel32_file_target_tail_guard() -> None:
+    """Recover a mapped file name when a caller leaves trailing stack bytes."""
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+    marker = "    @apihook('CreateFile', argc=7)\n"
+    helper = """    def _vibe_resolve_file_target(self, emu, target):
+        # A few loaders construct a correctly terminated basename in a stack
+        # buffer, but emulation can expose stale bytes after it.  Only trim a
+        # suffix when the exact, already-mapped candidate exists; this avoids
+        # changing normal file-name semantics.
+        try:
+            if emu.does_file_exist(target):
+                return target
+        except Exception:
+            return target
+        lowered = target.lower()
+        for ext in ('.exe', '.dll', '.sys', '.mui', '.bin', '.cfg', '.dat'):
+            pos = lowered.find(ext)
+            if pos < 0:
+                continue
+            candidate = target[:pos + len(ext)]
+            if candidate == target:
+                continue
+            try:
+                if emu.does_file_exist(candidate):
+                    return candidate
+            except Exception:
+                pass
+        return target
+
+"""
+    text = _insert_once(text, "def _vibe_resolve_file_target(", marker, helper, kernel32)
+    old = """        target = self.read_mem_string(fname, cw)
+        argv[0] = target
+"""
+    new = """        target = self.read_mem_string(fname, cw)
+        target = self._vibe_resolve_file_target(emu, target)
+        argv[0] = target
+"""
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif "target = self._vibe_resolve_file_target(emu, target)" not in text:
+        raise RuntimeError(f"CreateFile target guard anchor not found in {kernel32}")
+    kernel32.write_text(text, encoding="utf-8")
+
+
+def patch_kernel32_file_information_by_handle() -> None:
+    """Populate the minimum file metadata expected by the MSVC file layer."""
+    kernel32 = _speakeasy_root() / "winenv" / "api" / "usermode" / "kernel32.py"
+    text = kernel32.read_text(encoding="utf-8")
+    old = """    @apihook('GetFileInformationByHandle', argc=2)
+    def GetFileInformationByHandle(self, emu, argv, ctx={}):
+        \"\"\"
+        BOOL GetFileInformationByHandle(
+          HANDLE                       hFile,
+          LPBY_HANDLE_FILE_INFORMATION lpFileInformation
+        );
+        \"\"\"
+        return 0
+"""
+    new = """    @apihook('GetFileInformationByHandle', argc=2)
+    def GetFileInformationByHandle(self, emu, argv, ctx={}):
+        \"\"\"
+        BOOL GetFileInformationByHandle(
+          HANDLE                       hFile,
+          LPBY_HANDLE_FILE_INFORMATION lpFileInformation
+        );
+        \"\"\"
+        hFile, lpFileInformation = argv
+        try:
+            f = self.file_get(hFile)
+        except Exception:
+            f = None
+        if not f:
+            emu.set_last_error(windefs.ERROR_INVALID_PARAMETER)
+            return 0
+        try:
+            size = int(f.get_size()) & 0xFFFFFFFFFFFFFFFF
+        except Exception:
+            size = 0
+        if lpFileInformation:
+            # BY_HANDLE_FILE_INFORMATION is 52 bytes on both x86 and x64.
+            info = bytearray(52)
+            info[0:4] = (0x80).to_bytes(4, 'little')
+            info[28:32] = (0x1234ABCD).to_bytes(4, 'little')
+            info[32:36] = ((size >> 32) & 0xFFFFFFFF).to_bytes(4, 'little')
+            info[36:40] = (size & 0xFFFFFFFF).to_bytes(4, 'little')
+            info[40:44] = (1).to_bytes(4, 'little')
+            self.mem_write(lpFileInformation, bytes(info))
+        emu.set_last_error(windefs.ERROR_SUCCESS)
+        return 1
+"""
+    if old in text:
+        text = text.replace(old, new, 1)
+    elif "size = int(f.get_size()) & 0xFFFFFFFFFFFFFFFF" not in text:
+        raise RuntimeError(f"GetFileInformationByHandle patch anchor not found in {kernel32}")
+    kernel32.write_text(text, encoding="utf-8")
+
+
 def patch_cli_all_entrypoints_env() -> None:
     cli = _speakeasy_root() / "cli.py"
     text = cli.read_text(encoding="utf-8")
@@ -5389,6 +5488,21 @@ def patch_kernel32_ui_languages() -> None:
     @apihook('GetThreadUILanguage', argc=0)
     def GetThreadUILanguage(self, emu, argv, ctx={}):
         return 0x0409
+
+    @apihook('SetThreadPreferredUILanguages', argc=4)
+    def SetThreadPreferredUILanguages(self, emu, argv, ctx={}):
+        # Keep the current process language selection deterministic.  The
+        # function only reports the number of accepted language tags to this
+        # loader; it does not need to alter the emulated locale.
+        _flags, languages, _buffer, num_languages = argv
+        if num_languages:
+            try:
+                self.mem_write(num_languages, (1).to_bytes(4, 'little'))
+            except Exception:
+                pass
+        # A null language buffer is a capability probe used by some CRTs;
+        # report success just as Windows does when it accepts the request.
+        return 1
 
 """
     text = _insert_once(text, "def GetThreadPreferredUILanguages(", marker, handler, kernel32)
@@ -51815,6 +51929,8 @@ class Inodelog(api.ApiHandler):
 def main() -> None:
     patch_winemu_api_return_guard()
     patch_speakeasy_file_archive_empty_name_guard()
+    patch_kernel32_file_target_tail_guard()
+    patch_kernel32_file_information_by_handle()
     patch_cli_all_entrypoints_env()
     patch_fls_get_value2()
     patch_get_temp_path2()
