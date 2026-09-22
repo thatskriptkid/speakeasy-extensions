@@ -28,14 +28,23 @@ Build a patched Speakeasy image:
 docker build --platform linux/amd64 -t speakeasy-extensions:1.5.11 .
 ```
 
-Run one sample without Internet access:
+Run one sample without Internet access. EXE, DLL, and SYS use the fast
+triage command (60s, DllMain or DriverEntry only). Shellcode stays on the raw
+runner:
 
 ```bash
+python3 tools/analyze_sample.py --report-dir out/sample-001 /path/to/sample.dll
+python3 tools/analyze_sample.py --all-exports -o out/driver /path/to/sample.sys
 python3 tools/run_speakeasy_docker.py \
   --profile fast \
-  --report-dir out/sample-001 \
-  /path/to/sample.exe
+  --raw --arch x64 \
+  --report-dir out/shellcode \
+  /path/to/shellcode.bin
 ```
+
+`analyze_sample.py` writes `triage_report.md` and `triage_report.json` next to
+the usual Speakeasy JSON, behavior, and network artifacts. `.NET` assemblies
+are reported from the PE header only; Speakeasy does not emulate them.
 
 The runner writes:
 

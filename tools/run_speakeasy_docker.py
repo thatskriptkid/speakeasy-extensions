@@ -242,6 +242,14 @@ def _auto_module_dir(binary: Path, raw_arch: str = "") -> tuple[Path | None, str
     return None, arch, ""
 
 
+def entrypoint_docker_args(all_entrypoints: bool | None) -> list[str]:
+    """Pass the patched Speakeasy CLI switch into the container. None keeps the image default."""
+
+    if all_entrypoints is None:
+        return []
+    return ["-e", f"SPEAKEASY_ALL_ENTRYPOINTS={'1' if all_entrypoints else '0'}"]
+
+
 def run(args: argparse.Namespace) -> int:
     binary = args.binary.expanduser().resolve()
     if not binary.is_file():
@@ -250,6 +258,12 @@ def run(args: argparse.Namespace) -> int:
 
     report_dir = args.report_dir.expanduser().resolve()
     report_dir.mkdir(parents=True, exist_ok=True)
+    # Docker userns-remap is not the host user. The output dir must be writable
+    # by that mapped uid or Speakeasy cannot save the JSON report.
+    try:
+        os.chmod(report_dir, 0o777)
+    except OSError:
+        pass
     stem = binary.stem
     artifact_stem = _artifact_stem(binary)
 
@@ -385,6 +399,8 @@ def run(args: argparse.Namespace) -> int:
     extra_docker = os.environ.get("SPEAKEASY_DOCKER_EXTRA_ARGS", "").strip()
     if extra_docker:
         docker_cmd += shlex.split(extra_docker)
+    all_entrypoints = getattr(args, "all_entrypoints", None)
+    docker_cmd += entrypoint_docker_args(all_entrypoints)
     docker_cmd += [image, *speakeasy_cmd]
 
     meta: dict[str, Any] = {
@@ -402,6 +418,7 @@ def run(args: argparse.Namespace) -> int:
         "module_dir_arch": module_dir_arch,
         "module_dir_source": module_dir_source,
         "argv": args.argv,
+        "all_entrypoints": all_entrypoints,
         "memory_trace": memory_trace,
         "memory_dump": memory_dump,
         "emulate_children": emulate_children,
@@ -478,6 +495,22 @@ def main() -> int:
     p.add_argument("--network", default="")
     p.add_argument("--config", type=Path, default=None, help="Speakeasy config JSON mounted read-only")
     p.add_argument("--module-dir", type=Path, default=None, help="directory of PE modules for Speakeasy -l")
+    entrypoints = p.add_mutually_exclusive_group()
+    entrypoints.add_argument(
+        "--all-entrypoints",
+        dest="all_entrypoints",
+        action="store_const",
+        const=True,
+        help="emulate every PE export (DLL/SYS); default is the image policy",
+    )
+    entrypoints.add_argument(
+        "--no-all-entrypoints",
+        dest="all_entrypoints",
+        action="store_const",
+        const=False,
+        help="emulate only DllMain, EXE entry, or DriverEntry",
+    )
+    p.set_defaults(all_entrypoints=None)
     p.add_argument("--raw", action="store_true")
     p.add_argument("--arch", default="")
     p.add_argument("--raw-offset", default="")
